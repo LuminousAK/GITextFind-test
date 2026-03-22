@@ -1,0 +1,6 @@
+public/chunk/
+public/pagefind/
+node_modules/
+dist/
+TextMapCHS.json
+TextMapEN.json
