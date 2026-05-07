@@ -45,38 +45,36 @@ function preprocessForCharacterSearch(input) {
         .replace(/\s+/g, " ")
         .trim();
 
-    let output = "";
-    let previousWasCjk = false;
+    const isHan = (char) => /\p{Script=Han}/u.test(char);
+    const isPunctuation = (char) => /\p{P}/u.test(char);
+    const isNonSpaceNonHan = (char) => Boolean(char) && char !== " " && !isHan(char);
+    const isSearchableNonHan = (char) => Boolean(char) && char !== " " && !isPunctuation(char) && !isHan(char);
 
-    for (const char of normalized) {
+    let output = "";
+
+    for (let index = 0; index < normalized.length; index += 1) {
+        const char = normalized[index];
+
         if (char === " ") {
             if (output && output[output.length - 1] !== " ") {
                 output += " ";
             }
 
-            previousWasCjk = false;
             continue;
-        }
-
-        const isCjk = /\p{Script=Han}/u.test(char);
-
-        if (isCjk) {
-            if (output && output[output.length - 1] !== " ") {
-                output += " ";
-            }
-
-            output += char;
-            output += " ";
-            previousWasCjk = true;
-            continue;
-        }
-
-        if (previousWasCjk && output && output[output.length - 1] !== " ") {
-            output += " ";
         }
 
         output += char;
-        previousWasCjk = false;
+
+        const nextChar = normalized[index + 1] ?? "";
+        const needsSeparator = (
+            (isHan(char) && isHan(nextChar))
+            || (isHan(char) && isSearchableNonHan(nextChar))
+            || (isNonSpaceNonHan(char) && isHan(nextChar))
+        );
+
+        if (needsSeparator && output[output.length - 1] !== " ") {
+            output += " ";
+        }
     }
 
     return output.replace(/\s+/g, " ").trim();
