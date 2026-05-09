@@ -2,28 +2,31 @@ import * as pagefind from "pagefind";
 import fs from "fs";
 import path from "path";
 
-const BUCKET_COUNT = 1024;
+const BUCKET_COUNT = 512;
 const PREPROCESS_CONCURRENCY = 64;
 const INDEX_CONCURRENCY = 4;
 const PAGEFIND_OUTPUT_ROOT = path.resolve("./public/pagefind");
-const CHUNK_OUTPUT_ROOT = path.resolve("./public/chunk");
+const TEXT_DATA_OUTPUT_ROOT = path.resolve("./public/text-data");
+const TEMP_INDEX_OUTPUT_ROOT = path.resolve("./.tmp-pagefind-html");
+const LEGACY_CHUNK_OUTPUT_ROOT = path.resolve("./public/chunk");
 
 const LANGUAGE_CONFIGS = [
     {
         id: "chs",
         label: "简体中文",
-        sourceFile: "TextMapCHS.json",
-        pagefindOutputDir: path.join(PAGEFIND_OUTPUT_ROOT, "chs"),
-        chunkOutputDir: path.join(CHUNK_OUTPUT_ROOT, "chs")
+        sourceFile: "TextMapCHS.json"
     },
     {
         id: "en",
         label: "English",
-        sourceFile: "TextMapEN.json",
-        pagefindOutputDir: path.join(PAGEFIND_OUTPUT_ROOT, "en"),
-        chunkOutputDir: path.join(CHUNK_OUTPUT_ROOT, "en")
+        sourceFile: "TextMapEN.json"
     }
-];
+].map((config) => ({
+    ...config,
+    pagefindOutputDir: path.join(PAGEFIND_OUTPUT_ROOT, config.id),
+    textDataOutputDir: path.join(TEXT_DATA_OUTPUT_ROOT, config.id),
+    tempIndexOutputDir: path.join(TEMP_INDEX_OUTPUT_ROOT, config.id)
+}));
 
 function escapeHtml(value) {
     return String(value).replace(/[&<>"']/g, (char) => {
@@ -95,9 +98,7 @@ function bucketEntries(entries) {
     const buckets = Array.from({ length: BUCKET_COUNT }, () => []);
 
     for (const entry of entries) {
-        const { hash } = entry;
-        const bucketId = getBucketId(hash);
-
+        const bucketId = getBucketId(entry.hash);
         buckets[Number(bucketId)].push(entry);
     }
 
@@ -109,26 +110,26 @@ function bucketEntries(entries) {
         .filter((bucket) => bucket.entries.length > 0);
 }
 
-function summarizeBucketStats(buckets) {
+function summarizeBucketStats(buckets, getText = (entry) => entry.searchText) {
     const entryCounts = buckets.map((bucket) => bucket.entries.length).sort((left, right) => left - right);
     const charCounts = buckets
-        .map((bucket) => bucket.entries.reduce((sum, entry) => sum + String(entry.searchText ?? "").length, 0))
+        .map((bucket) => bucket.entries.reduce((sum, entry) => sum + String(getText(entry) ?? "").length, 0))
         .sort((left, right) => left - right);
-    const percentile = (values, rate) => values[Math.floor((values.length - 1) * rate)];
+    const percentile = (values, rate) => values[Math.floor((values.length - 1) * rate)] ?? 0;
 
     return {
         bucketCount: buckets.length,
         entriesPerBucket: {
-            min: entryCounts[0],
+            min: entryCounts[0] ?? 0,
             median: percentile(entryCounts, 0.5),
             p90: percentile(entryCounts, 0.9),
-            max: entryCounts[entryCounts.length - 1]
+            max: entryCounts[entryCounts.length - 1] ?? 0
         },
         charsPerBucket: {
-            min: charCounts[0],
+            min: charCounts[0] ?? 0,
             median: percentile(charCounts, 0.5),
             p90: percentile(charCounts, 0.9),
-            max: charCounts[charCounts.length - 1]
+            max: charCounts[charCounts.length - 1] ?? 0
         }
     };
 }
@@ -156,139 +157,63 @@ async function mapWithConcurrency(items, concurrency, iteratee) {
     return results;
 }
 
-function buildChunkPage({ chunkId, languageLabel, sections }) {
-    const title = `Chunk ${chunkId} (${languageLabel})`;
+function buildIndexPage({ chunkId, languageLabel, sections }) {
+    const title = `Index ${chunkId} (${languageLabel})`;
 
     return `<!doctype html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>${escapeHtml(title)}</title>
-    <style>
-        body {
-            margin: 0;
-            font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-            color: #2a241f;
-            background: #f5efe6;
-        }
-
-        main {
-            width: min(960px, calc(100vw - 32px));
-            margin: 32px auto;
-            padding: 24px;
-            border-radius: 20px;
-            background: rgba(255, 252, 248, 0.96);
-            box-shadow: 0 18px 48px rgba(69, 44, 28, 0.12);
-        }
-
-        h1 {
-            margin: 0 0 12px;
-            font-size: 2rem;
-        }
-
-        .lead {
-            margin: 0 0 24px;
-            color: #6f6053;
-        }
-
-        section {
-            padding: 16px 0;
-            border-top: 1px solid rgba(69, 44, 28, 0.12);
-        }
-
-        section:first-of-type {
-            border-top: 0;
-        }
-
-        h2 {
-            margin: 0 0 10px;
-            font-size: 1.05rem;
-        }
-
-        p {
-            margin: 0;
-            line-height: 1.8;
-            word-break: break-word;
-        }
-
-        .text-row + .text-row {
-            margin-top: 6px;
-        }
-
-        .text-label {
-            font-weight: 700;
-            color: #7a5538;
-        }
-
-        .indexed-text {
-            margin-top: 4px;
-            max-height: 0;
-            overflow: hidden;
-            color: transparent;
-            font-size: 1px;
-            line-height: 1;
-            user-select: none;
-            pointer-events: none;
-        }
-    </style>
 </head>
 <body>
-    <main>
+    <main data-pagefind-body>
         <h1>${escapeHtml(title)}</h1>
-        <p class="lead">This chunk contains ${sections.length} merged hash records for Pagefind.</p>
-        <div data-pagefind-body>
 ${sections.join("\n")}
-        </div>
     </main>
 </body>
 </html>`;
 }
 
-async function buildChunkDocument(languageConfig, chunkId, chunkEntries) {
-    const chunkUrl = `/chunk/${languageConfig.id}/${chunkId}/`;
-    const chunkDir = path.join(languageConfig.chunkOutputDir, chunkId);
-    const chunkFilePath = path.join(chunkDir, "index.html");
+async function buildIndexDocument(languageConfig, bucketId, bucketEntriesForLanguage) {
+    const tempFilePath = path.join(languageConfig.tempIndexOutputDir, bucketId, "index.html");
 
     const sections = await mapWithConcurrency(
-        chunkEntries,
+        bucketEntriesForLanguage,
         PREPROCESS_CONCURRENCY,
         async (entry) => {
             const headingId = `hash-${entry.hash}`;
             const processedText = preprocessForCharacterSearch(entry.searchText);
-            const originalTextChs = String(entry.texts.chs ?? "");
-            const originalTextEn = String(entry.texts.en ?? "");
 
             return [
-                `            <section data-hash="${escapeHtml(entry.hash)}">`,
-                `                <h2 id="${escapeHtml(headingId)}">${escapeHtml(entry.hash)}</h2>`,
-                `                <p class="text-row" data-original-text-chs><span class="text-label">简体中文:</span> ${escapeHtml(originalTextChs)}</p>`,
-                `                <p class="text-row" data-original-text-en><span class="text-label">English:</span> ${escapeHtml(originalTextEn)}</p>`,
-                `                <p class="indexed-text" aria-hidden="true">${escapeHtml(processedText)}</p>`,
-                "            </section>"
+                `        <section data-hash="${escapeHtml(entry.hash)}">`,
+                `            <h2 id="${escapeHtml(headingId)}">${escapeHtml(entry.hash)}</h2>`,
+                `            <p>${escapeHtml(processedText)}</p>`,
+                "        </section>"
             ].join("\n");
         }
     );
 
-    const html = buildChunkPage({
-        chunkId,
-        languageLabel: languageConfig.label,
-        sections
-    });
-
     return {
-        chunkId,
-        chunkUrl,
-        chunkFilePath,
-        html
+        bucketId,
+        sourcePath: `index-source/${languageConfig.id}/${bucketId}/index.html`,
+        tempFilePath,
+        html: buildIndexPage({
+            chunkId: bucketId,
+            languageLabel: languageConfig.label,
+            sections
+        })
     };
 }
 
 function resetOutputDirs() {
     fs.rmSync(PAGEFIND_OUTPUT_ROOT, { force: true, recursive: true });
-    fs.rmSync(CHUNK_OUTPUT_ROOT, { force: true, recursive: true });
+    fs.rmSync(TEXT_DATA_OUTPUT_ROOT, { force: true, recursive: true });
+    fs.rmSync(TEMP_INDEX_OUTPUT_ROOT, { force: true, recursive: true });
+    fs.rmSync(LEGACY_CHUNK_OUTPUT_ROOT, { force: true, recursive: true });
     fs.mkdirSync(PAGEFIND_OUTPUT_ROOT, { recursive: true });
-    fs.mkdirSync(CHUNK_OUTPUT_ROOT, { recursive: true });
+    fs.mkdirSync(TEXT_DATA_OUTPUT_ROOT, { recursive: true });
+    fs.mkdirSync(TEMP_INDEX_OUTPUT_ROOT, { recursive: true });
 }
 
 function loadLanguageRecordMap(sourceFile) {
@@ -296,53 +221,96 @@ function loadLanguageRecordMap(sourceFile) {
     return JSON.parse(rawData);
 }
 
-function buildCombinedEntries(languageMaps, searchLanguageId) {
-    const allHashes = new Set();
-
-    for (const records of Object.values(languageMaps)) {
-        for (const hash of Object.keys(records)) {
-            allHashes.add(hash);
-        }
-    }
-
-    return Array.from(allHashes)
-        .sort()
-        .map((hash) => ({
+function buildSearchEntries(languageRecords) {
+    return Object.entries(languageRecords)
+        .map(([hash, searchText]) => ({
             hash,
-            searchText: String(languageMaps[searchLanguageId]?.[hash] ?? ""),
-            texts: {
-                chs: String(languageMaps.chs?.[hash] ?? ""),
-                en: String(languageMaps.en?.[hash] ?? "")
-            }
-        }));
+            searchText: String(searchText ?? "")
+        }))
+        .filter((entry) => entry.searchText.trim())
+        .sort((left, right) => left.hash.localeCompare(right.hash));
 }
 
-async function buildLanguageIndex(languageConfig, languageMaps) {
+async function writeLanguageTextData(languageConfig, languageRecords) {
+    const entries = Object.entries(languageRecords)
+        .map(([hash, text]) => ({
+            hash,
+            text: String(text ?? "")
+        }))
+        .sort((left, right) => left.hash.localeCompare(right.hash));
+    const buckets = bucketEntries(entries);
+    const bucketStats = summarizeBucketStats(buckets, (entry) => entry.text);
+    const startedAt = Date.now();
+
+    fs.mkdirSync(languageConfig.textDataOutputDir, { recursive: true });
+
+    await mapWithConcurrency(
+        buckets,
+        INDEX_CONCURRENCY,
+        async (bucket, bucketIndex) => {
+            const textMap = Object.fromEntries(bucket.entries.map((entry) => [entry.hash, entry.text]));
+            const outputPath = path.join(languageConfig.textDataOutputDir, `${bucket.bucketId}.json`);
+
+            fs.writeFileSync(outputPath, JSON.stringify(textMap), "utf-8");
+
+            if ((bucketIndex + 1) % 100 === 0 || bucketIndex === buckets.length - 1) {
+                console.log(`[${languageConfig.id}] Wrote ${bucketIndex + 1} / ${buckets.length} text-data buckets...`);
+            }
+        }
+    );
+
+    console.log(
+        `[${languageConfig.id}] Text data buckets built in ${Date.now() - startedAt}ms `
+        + `(buckets=${bucketStats.bucketCount}, entries min/median/p90/max: `
+        + `${bucketStats.entriesPerBucket.min}/${bucketStats.entriesPerBucket.median}/${bucketStats.entriesPerBucket.p90}/${bucketStats.entriesPerBucket.max}, `
+        + `chars min/median/p90/max: ${bucketStats.charsPerBucket.min}/${bucketStats.charsPerBucket.median}/${bucketStats.charsPerBucket.p90}/${bucketStats.charsPerBucket.max}).`
+    );
+}
+
+function writeTextDataManifest() {
+    const manifest = {
+        bucketCount: BUCKET_COUNT,
+        pathTemplate: "text-data/{language}/{bucket}.json",
+        languages: LANGUAGE_CONFIGS.map((config) => ({
+            id: config.id,
+            label: config.label,
+            sourceFile: config.sourceFile
+        }))
+    };
+
+    fs.writeFileSync(
+        path.join(TEXT_DATA_OUTPUT_ROOT, "manifest.json"),
+        `${JSON.stringify(manifest, null, 2)}\n`,
+        "utf-8"
+    );
+}
+
+async function buildLanguageIndex(languageConfig, languageRecords) {
     const buildStartedAt = Date.now();
     const { index } = await pagefind.createIndex({
         forceLanguage: "en"
     });
 
-    const entries = buildCombinedEntries(languageMaps, languageConfig.id);
+    const entries = buildSearchEntries(languageRecords);
     const buckets = bucketEntries(entries);
     const bucketStats = summarizeBucketStats(buckets);
 
-    console.log(`[${languageConfig.id}] Loaded ${entries.length} combined records.`);
+    console.log(`[${languageConfig.id}] Loaded ${entries.length} searchable records.`);
     console.log(
-        `[${languageConfig.id}] Building ${bucketStats.bucketCount} hash-addressable buckets with BUCKET_COUNT=${BUCKET_COUNT} `
+        `[${languageConfig.id}] Building ${bucketStats.bucketCount} pure HTML index buckets with BUCKET_COUNT=${BUCKET_COUNT} `
         + `(entries min/median/p90/max: ${bucketStats.entriesPerBucket.min}/${bucketStats.entriesPerBucket.median}/${bucketStats.entriesPerBucket.p90}/${bucketStats.entriesPerBucket.max}, `
         + `chars min/median/p90/max: ${bucketStats.charsPerBucket.min}/${bucketStats.charsPerBucket.median}/${bucketStats.charsPerBucket.p90}/${bucketStats.charsPerBucket.max}).`
     );
 
     const preprocessStartedAt = Date.now();
-    const chunkDocuments = await mapWithConcurrency(
+    const indexDocuments = await mapWithConcurrency(
         buckets,
         INDEX_CONCURRENCY,
-        async (bucket, chunkIndex) => {
-            const document = await buildChunkDocument(languageConfig, bucket.bucketId, bucket.entries);
+        async (bucket, bucketIndex) => {
+            const document = await buildIndexDocument(languageConfig, bucket.bucketId, bucket.entries);
 
-            if ((chunkIndex + 1) % 100 === 0 || chunkIndex === buckets.length - 1) {
-                console.log(`[${languageConfig.id}] Prepared ${chunkIndex + 1} / ${buckets.length} chunk documents...`);
+            if ((bucketIndex + 1) % 100 === 0 || bucketIndex === buckets.length - 1) {
+                console.log(`[${languageConfig.id}] Prepared ${bucketIndex + 1} / ${buckets.length} index documents...`);
             }
 
             return document;
@@ -351,29 +319,31 @@ async function buildLanguageIndex(languageConfig, languageMaps) {
 
     console.log(`[${languageConfig.id}] Preprocessing finished in ${Date.now() - preprocessStartedAt}ms.`);
 
-    const writeStartedAt = Date.now();
+    const indexStartedAt = Date.now();
     await mapWithConcurrency(
-        chunkDocuments,
+        indexDocuments,
         INDEX_CONCURRENCY,
-        async (document, chunkIndex) => {
-            fs.mkdirSync(path.dirname(document.chunkFilePath), { recursive: true });
-            fs.writeFileSync(document.chunkFilePath, document.html, "utf-8");
+        async (document, documentIndex) => {
+            fs.mkdirSync(path.dirname(document.tempFilePath), { recursive: true });
+            fs.writeFileSync(document.tempFilePath, document.html, "utf-8");
 
             await index.addHTMLFile({
-                sourcePath: `chunk/${languageConfig.id}/${document.chunkId}/index.html`,
+                sourcePath: document.sourcePath,
                 content: document.html
             });
 
-            if ((chunkIndex + 1) % 100 === 0 || chunkIndex === chunkDocuments.length - 1) {
-                console.log(`[${languageConfig.id}] Indexed ${chunkIndex + 1} / ${chunkDocuments.length} chunk documents...`);
+            if ((documentIndex + 1) % 100 === 0 || documentIndex === indexDocuments.length - 1) {
+                console.log(`[${languageConfig.id}] Indexed ${documentIndex + 1} / ${indexDocuments.length} documents...`);
             }
         }
     );
 
-    console.log(`[${languageConfig.id}] Chunk pages and in-memory index built in ${Date.now() - writeStartedAt}ms.`);
+    console.log(`[${languageConfig.id}] In-memory index built in ${Date.now() - indexStartedAt}ms.`);
 
     await index.writeFiles({ outputPath: languageConfig.pagefindOutputDir });
     await index.deleteIndex();
+
+    fs.rmSync(languageConfig.tempIndexOutputDir, { force: true, recursive: true });
 
     console.log(`[${languageConfig.id}] Pagefind index built in ${Date.now() - buildStartedAt}ms total.`);
 }
@@ -385,11 +355,14 @@ async function buildAllIndexes() {
     );
 
     resetOutputDirs();
+    writeTextDataManifest();
 
     for (const languageConfig of LANGUAGE_CONFIGS) {
-        await buildLanguageIndex(languageConfig, languageMaps);
+        await writeLanguageTextData(languageConfig, languageMaps[languageConfig.id]);
+        await buildLanguageIndex(languageConfig, languageMaps[languageConfig.id]);
     }
 
+    fs.rmSync(TEMP_INDEX_OUTPUT_ROOT, { force: true, recursive: true });
     await pagefind.close();
 }
 

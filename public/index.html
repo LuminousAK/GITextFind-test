@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Pagefind Chunk Demo</title>
+    <title>Pagefind Text Bucket Demo</title>
     <style>
         :root {
             --bg: #f4efe6;
@@ -206,10 +206,10 @@
 </head>
 <body>
     <main class="shell">
-        <h1>Pagefind Chunk Demo</h1>
+        <h1>Pagefind Text Bucket Demo</h1>
         <p class="lead">
             This page can search either the Simplified Chinese or English Pagefind index.
-            Results are matched with the selected language index, then both language texts are shown together by hash.
+            Results are matched with the selected language index, then display text is loaded from language-specific hash buckets.
         </p>
 
         <form class="searchbar" id="search-form">
@@ -229,8 +229,8 @@
 
         <div class="meta-bar">
             <span class="tip">Index root: <code>./pagefind/&lt;language&gt;/</code></span>
-            <span class="tip">Result URL: <code>./chunk/&lt;language&gt;/&lt;group&gt;/#hash-&lt;hash&gt;</code></span>
-            <span class="tip">Render mode: <code>show 简体中文 + English together</code></span>
+            <span class="tip">Text data: <code>./text-data/&lt;language&gt;/&lt;bucket&gt;.json</code></span>
+            <span class="tip">Render mode: <code>show search language + 简体中文 + English</code></span>
         </div>
 
         <div id="status" class="status">Initializing Pagefind...</div>

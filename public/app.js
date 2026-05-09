@@ -1,5 +1,7 @@
 import * as pagefind from "./pagefind/chs/pagefind.js";
 
+const BUCKET_COUNT = 512;
+
 const LANGUAGE_LABELS = {
     chs: "简体中文",
     en: "English"
@@ -19,10 +21,33 @@ const results = document.getElementById("results");
 let searchToken = 0;
 let activeLanguage = languageSelect.value;
 let initializedLanguage = null;
-const chunkDocumentCache = new Map();
+const textBucketCache = new Map();
 
 function getLanguageBasePath(language) {
     return new URL(`./pagefind/${language}/`, window.location.href).pathname;
+}
+
+function getTextBucketUrl(language, bucketId) {
+    return new URL(`./text-data/${language}/${bucketId}.json`, window.location.href).href;
+}
+
+function getDisplayLanguages(searchLanguage) {
+    return Array.from(new Set([searchLanguage, "chs", "en"]));
+}
+
+function getLanguageLabel(language) {
+    return LANGUAGE_LABELS[language] || language;
+}
+
+function getBucketId(hash) {
+    let mixedHash = 0x811c9dc5;
+
+    for (let index = 0; index < hash.length; index += 1) {
+        mixedHash ^= hash.charCodeAt(index);
+        mixedHash = Math.imul(mixedHash, 0x01000193);
+    }
+
+    return String((mixedHash >>> 0) % BUCKET_COUNT).padStart(4, "0");
 }
 
 function escapeHtml(value) {
@@ -45,38 +70,36 @@ function preprocessForCharacterSearch(input) {
         .replace(/\s+/g, " ")
         .trim();
 
-    let output = "";
-    let previousWasCjk = false;
+    const isHan = (char) => /\p{Script=Han}/u.test(char);
+    const isPunctuation = (char) => /\p{P}/u.test(char);
+    const isNonSpaceNonHan = (char) => Boolean(char) && char !== " " && !isHan(char);
+    const isSearchableNonHan = (char) => Boolean(char) && char !== " " && !isPunctuation(char) && !isHan(char);
 
-    for (const char of normalized) {
+    let output = "";
+
+    for (let index = 0; index < normalized.length; index += 1) {
+        const char = normalized[index];
+
         if (char === " ") {
             if (output && output[output.length - 1] !== " ") {
                 output += " ";
             }
 
-            previousWasCjk = false;
             continue;
-        }
-
-        const isCjk = /\p{Script=Han}/u.test(char);
-
-        if (isCjk) {
-            if (output && output[output.length - 1] !== " ") {
-                output += " ";
-            }
-
-            output += char;
-            output += " ";
-            previousWasCjk = true;
-            continue;
-        }
-
-        if (previousWasCjk && output && output[output.length - 1] !== " ") {
-            output += " ";
         }
 
         output += char;
-        previousWasCjk = false;
+
+        const nextChar = normalized[index + 1] ?? "";
+        const needsSeparator = (
+            (isHan(char) && isHan(nextChar))
+            || (isHan(char) && isSearchableNonHan(nextChar))
+            || (isNonSpaceNonHan(char) && isHan(nextChar))
+        );
+
+        if (needsSeparator && output[output.length - 1] !== " ") {
+            output += " ";
+        }
     }
 
     return output.replace(/\s+/g, " ").trim();
@@ -142,11 +165,14 @@ function buildMatchInfo(item, rawKeyword, language) {
     }
 
     const candidates = [
-        item.title,
         item.searchLanguageText,
-        item.excerpt,
-        language === "chs" ? item.texts.chs : item.texts.en
+        item.title,
+        item.excerpt
     ];
+
+    if (item.texts[language] && item.texts[language] !== item.searchLanguageText) {
+        candidates.push(item.texts[language]);
+    }
 
     let bestIndex = Infinity;
     let bestField = "";
@@ -172,58 +198,61 @@ function buildMatchInfo(item, rawKeyword, language) {
     };
 }
 
-async function loadChunkTextMap(chunkUrl) {
-    if (!chunkDocumentCache.has(chunkUrl)) {
-        chunkDocumentCache.set(chunkUrl, (async () => {
-            const response = await fetch(chunkUrl);
+async function loadTextBucket(language, bucketId) {
+    const cacheKey = `${language}:${bucketId}`;
+
+    if (!textBucketCache.has(cacheKey)) {
+        textBucketCache.set(cacheKey, (async () => {
+            const response = await fetch(getTextBucketUrl(language, bucketId));
 
             if (!response.ok) {
-                throw new Error(`Failed to load chunk page: ${chunkUrl}`);
+                throw new Error(`Failed to load text bucket: ${language}/${bucketId}`);
             }
 
-            const html = await response.text();
-            const parser = new DOMParser();
-            const document = parser.parseFromString(html, "text/html");
-            const textMap = new Map();
-
-            document.querySelectorAll("section[data-hash]").forEach((section) => {
-                const hash = section.getAttribute("data-hash");
-                const chsText = section.querySelector("[data-original-text-chs]")?.textContent?.replace(/^简体中文:?\s*/, "").trim() || "";
-                const enText = section.querySelector("[data-original-text-en]")?.textContent?.replace(/^English:\s*/, "").trim() || "";
-
-                if (hash) {
-                    textMap.set(hash, {
-                        chs: chsText,
-                        en: enText
-                    });
-                }
-            });
-
-            return textMap;
+            return response.json();
         })());
     }
 
-    return chunkDocumentCache.get(chunkUrl);
+    return textBucketCache.get(cacheKey);
 }
 
 async function hydrateOriginalTexts(items, language) {
-    const hydratedItems = await Promise.all(items.map(async (item) => {
+    const displayLanguages = getDisplayLanguages(language);
+
+    return Promise.all(items.map(async (item) => {
         if (item.kind !== "hash" || !item.hash) {
             return item;
         }
 
-        const chunkUrl = item.url.split("#")[0];
-        const chunkTextMap = await loadChunkTextMap(chunkUrl);
-        const texts = chunkTextMap.get(item.hash) || { chs: "", en: "" };
+        const bucketId = getBucketId(item.hash);
+        const textEntries = await Promise.all(displayLanguages.map(async (displayLanguage) => {
+            try {
+                const bucket = await loadTextBucket(displayLanguage, bucketId);
+                return [displayLanguage, String(bucket[item.hash] ?? "")];
+            } catch (error) {
+                console.warn(error);
+                return [displayLanguage, ""];
+            }
+        }));
+        const texts = Object.fromEntries(textEntries);
 
         return {
             ...item,
+            displayLanguages,
             texts,
-            searchLanguageText: language === "chs" ? texts.chs : texts.en
+            searchLanguageText: texts[language] || ""
         };
     }));
+}
 
-    return hydratedItems;
+function extractHashFromResult(subResult) {
+    const fromUrl = subResult.url?.match(/#hash-([^#/?]+)/)?.[1];
+
+    if (fromUrl) {
+        return decodeURIComponent(fromUrl);
+    }
+
+    return subResult.title || "unknown";
 }
 
 function flattenResults(searchResults, loadedDocuments, language) {
@@ -235,7 +264,8 @@ function flattenResults(searchResults, loadedDocuments, language) {
 
         if (subResults.length) {
             subResults.forEach((subResult) => {
-                const hash = subResult.url.match(/#hash-([^#/?]+)/)?.[1] || subResult.title || "unknown";
+                const hash = extractHashFromResult(subResult);
+
                 flattened.push({
                     kind: "hash",
                     title: subResult.title || hash,
@@ -243,10 +273,8 @@ function flattenResults(searchResults, loadedDocuments, language) {
                     url: subResult.url,
                     excerpt: subResult.excerpt || document.excerpt || "",
                     score: searchResult.score,
-                    texts: {
-                        chs: "",
-                        en: ""
-                    },
+                    texts: {},
+                    displayLanguages: getDisplayLanguages(language),
                     searchLanguageText: "",
                     searchLanguage: language
                 });
@@ -290,26 +318,29 @@ function filterAndSortResults(items, rawKeyword, language) {
 }
 
 function renderItems(items, language) {
-    const languageLabel = LANGUAGE_LABELS[language] || language;
+    const languageLabel = getLanguageLabel(language);
 
-    results.innerHTML = items.map((item) => `
+    results.innerHTML = items.map((item) => {
+        const displayLanguages = item.displayLanguages?.length ? item.displayLanguages : getDisplayLanguages(language);
+        const textBlocks = displayLanguages.map((displayLanguage) => `
+                <div class="excerpt-block">
+                    <p class="excerpt-label">${escapeHtml(getLanguageLabel(displayLanguage))}</p>
+                    <p class="excerpt">${escapeHtml(item.texts[displayLanguage] || "No text available.")}</p>
+                </div>
+        `).join("");
+
+        return `
         <article class="result">
             <span class="result-kind">Matched in ${escapeHtml(languageLabel)}</span>
-            <h2><a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(item.title)}</a></h2>
-            <p class="result-path">URL: ${escapeHtml(item.url)}</p>
+            <h2>${escapeHtml(item.title)}</h2>
+            <p class="result-path">Pagefind source: ${escapeHtml(item.url || "-")}</p>
             <p class="result-hash">hash: ${escapeHtml(item.hash || "-")}</p>
             <div class="excerpt-group">
-                <div class="excerpt-block">
-                    <p class="excerpt-label">简体中文</p>
-                    <p class="excerpt">${escapeHtml(item.texts.chs || "No text available.")}</p>
-                </div>
-                <div class="excerpt-block">
-                    <p class="excerpt-label">English</p>
-                    <p class="excerpt">${escapeHtml(item.texts.en || "No text available.")}</p>
-                </div>
+${textBlocks}
             </div>
         </article>
-    `).join("");
+    `;
+    }).join("");
 }
 
 async function ensureReady(language) {
@@ -322,7 +353,7 @@ async function ensureReady(language) {
     await pagefind.init();
     initializedLanguage = language;
     activeLanguage = language;
-    status.textContent = `${LANGUAGE_LABELS[language]} index is ready. Click Search or press Enter to run a query.`;
+    status.textContent = `${getLanguageLabel(language)} index is ready. Click Search or press Enter to run a query.`;
 }
 
 async function runSearch(term, language) {
@@ -333,12 +364,12 @@ async function runSearch(term, language) {
 
     if (!keyword) {
         status.textContent = "Enter a keyword to search.";
-        setPlaceholder("Results will appear here. The selected language index will be queried, and both language texts will be shown.");
+        setPlaceholder("Results will appear here. The selected language index will be queried, then display text will be loaded from text-data buckets.");
         return;
     }
 
-    status.textContent = `Searching ${LANGUAGE_LABELS[language]} for "${keyword}" with exact query ${exactKeyword} ...`;
-    setPlaceholder("Loading matching index shards on demand...");
+    status.textContent = `Searching ${getLanguageLabel(language)} for "${keyword}" with exact query ${exactKeyword} ...`;
+    setPlaceholder("Loading matching index shards and text buckets on demand...");
 
     try {
         await ensureReady(language);
@@ -349,7 +380,7 @@ async function runSearch(term, language) {
         }
 
         if (!search.results.length) {
-            status.textContent = `No results for "${keyword}" in ${LANGUAGE_LABELS[language]}.`;
+            status.textContent = `No results for "${keyword}" in ${getLanguageLabel(language)}.`;
             setPlaceholder("No match found. Try a shorter or more common keyword.");
             return;
         }
@@ -365,17 +396,17 @@ async function runSearch(term, language) {
         }
 
         if (!filteredItems.length) {
-            status.textContent = `No continuously matched results for "${keyword}" in ${LANGUAGE_LABELS[language]}.`;
+            status.textContent = `No continuously matched results for "${keyword}" in ${getLanguageLabel(language)}.`;
             setPlaceholder("Pagefind found coarse matches, but none survived the front-end contiguous-match filter.");
             return;
         }
 
-        status.textContent = `Found ${filteredItems.length} rendered result(s) from ${search.results.length} Pagefind group match(es) in ${LANGUAGE_LABELS[language]}.`;
+        status.textContent = `Found ${filteredItems.length} rendered result(s) from ${search.results.length} Pagefind group match(es) in ${getLanguageLabel(language)}.`;
         renderItems(filteredItems, language);
     } catch (error) {
         console.error(error);
         status.textContent = "Search failed. Open this page through an HTTP server instead of double-clicking the HTML file.";
-        setPlaceholder("Initialization or search failed. Check DevTools for missing <code>pagefind</code> requests.");
+        setPlaceholder("Initialization or search failed. Check DevTools for missing <code>pagefind</code> or <code>text-data</code> requests.");
     }
 }
 
@@ -391,19 +422,19 @@ form.addEventListener("submit", (event) => {
 languageSelect.addEventListener("change", async () => {
     const language = languageSelect.value;
     syncLanguageUI(language);
-    status.textContent = `Switching to ${LANGUAGE_LABELS[language]} index...`;
+    status.textContent = `Switching to ${getLanguageLabel(language)} index...`;
     setPlaceholder("Results will appear here after you run a search.");
 
     try {
         await ensureReady(language);
     } catch (error) {
         console.error(error);
-        status.textContent = `Failed to switch to ${LANGUAGE_LABELS[language]} index.`;
+        status.textContent = `Failed to switch to ${getLanguageLabel(language)} index.`;
     }
 });
 
 syncLanguageUI(activeLanguage);
-setPlaceholder("Results will appear here. The selected language index will be queried, and both language texts will be shown.");
+setPlaceholder("Results will appear here. The selected language index will be queried, then display text will be loaded from text-data buckets.");
 ensureReady(activeLanguage).catch((error) => {
     console.error(error);
     status.textContent = "Pagefind initialization failed. Serve this directory over HTTP.";
