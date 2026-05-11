@@ -12,16 +12,31 @@ const SEARCH_PLACEHOLDERS = {
     en: "Enter English keywords to search with the English index"
 };
 
+const SOURCE_TYPE_LABELS = {
+    talk: "对话文本",
+    readable: "阅读物",
+    subtitle: "字幕",
+    textmap: "其他文本",
+    unknown: "未知来源"
+};
+
 const input = document.getElementById("search-input");
 const form = document.getElementById("search-form");
 const languageSelect = document.getElementById("language-select");
 const status = document.getElementById("status");
 const results = document.getElementById("results");
+const drawerBackdrop = document.getElementById("drawer-backdrop");
+const contextDrawer = document.getElementById("context-drawer");
+const drawerClose = document.getElementById("drawer-close");
+const drawerTitle = document.getElementById("drawer-title");
+const drawerSubtitle = document.getElementById("drawer-subtitle");
+const drawerContent = document.getElementById("drawer-content");
 
 let searchToken = 0;
 let activeLanguage = languageSelect.value;
 let initializedLanguage = null;
 const textBucketCache = new Map();
+const renderedItems = new Map();
 
 function getLanguageBasePath(language) {
     return new URL(`./pagefind/${language}/`, window.location.href).pathname;
@@ -37,6 +52,10 @@ function getDisplayLanguages(searchLanguage) {
 
 function getLanguageLabel(language) {
     return LANGUAGE_LABELS[language] || language;
+}
+
+function getSourceTypeLabel(sourceType) {
+    return SOURCE_TYPE_LABELS[sourceType] || SOURCE_TYPE_LABELS.unknown;
 }
 
 function getBucketId(hash) {
@@ -64,8 +83,8 @@ function escapeHtml(value) {
     });
 }
 
-function preprocessForCharacterSearch(input) {
-    const normalized = String(input ?? "")
+function preprocessForCharacterSearch(inputValue) {
+    const normalized = String(inputValue ?? "")
         .replace(/\r\n?/g, "\n")
         .replace(/\s+/g, " ")
         .trim();
@@ -105,8 +124,8 @@ function preprocessForCharacterSearch(input) {
     return output.replace(/\s+/g, " ").trim();
 }
 
-function preprocessExactQuery(input) {
-    const normalized = String(input ?? "")
+function preprocessExactQuery(inputValue) {
+    const normalized = String(inputValue ?? "")
         .replace(/\s+/g, " ")
         .trim();
 
@@ -255,6 +274,22 @@ function extractHashFromResult(subResult) {
     return subResult.title || "unknown";
 }
 
+function buildResultSourceMeta(item) {
+    const hash = String(item.hash || item.title || "unknown");
+
+    return {
+        sourceType: "unknown",
+        origin: `${getSourceTypeLabel("unknown")}：${hash}`,
+        canOpenContext: true,
+        contextKey: hash,
+        contextParams: {
+            hash,
+            pagefindUrl: item.url || "",
+            searchLanguage: item.searchLanguage || activeLanguage
+        }
+    };
+}
+
 function flattenResults(searchResults, loadedDocuments, language) {
     const flattened = [];
 
@@ -265,8 +300,7 @@ function flattenResults(searchResults, loadedDocuments, language) {
         if (subResults.length) {
             subResults.forEach((subResult) => {
                 const hash = extractHashFromResult(subResult);
-
-                flattened.push({
+                const baseItem = {
                     kind: "hash",
                     title: subResult.title || hash,
                     hash,
@@ -277,6 +311,11 @@ function flattenResults(searchResults, loadedDocuments, language) {
                     displayLanguages: getDisplayLanguages(language),
                     searchLanguageText: "",
                     searchLanguage: language
+                };
+
+                flattened.push({
+                    ...baseItem,
+                    ...buildResultSourceMeta(baseItem)
                 });
             });
         }
@@ -317,10 +356,30 @@ function filterAndSortResults(items, rawKeyword, language) {
         });
 }
 
+function renderSourceControl(item, resultId) {
+    const sourceLabel = item.origin || `${getSourceTypeLabel(item.sourceType)}：${item.hash || "-"}`;
+    const clickableClass = item.canOpenContext ? " is-clickable" : "";
+    const disabledAttribute = item.canOpenContext ? "" : " disabled";
+    const arrow = item.canOpenContext ? '<span class="origin-arrow">&gt;</span>' : "";
+
+    return `
+            <p class="result-source">
+                <button class="origin-action${clickableClass}" type="button" data-result-id="${escapeHtml(resultId)}"${disabledAttribute}>
+                    来源：${escapeHtml(sourceLabel)}
+                    ${arrow}
+                </button>
+            </p>
+    `;
+}
+
 function renderItems(items, language) {
     const languageLabel = getLanguageLabel(language);
+    renderedItems.clear();
 
-    results.innerHTML = items.map((item) => {
+    results.innerHTML = items.map((item, index) => {
+        const resultId = `${item.contextKey || item.hash || "result"}-${index}`;
+        renderedItems.set(resultId, item);
+
         const displayLanguages = item.displayLanguages?.length ? item.displayLanguages : getDisplayLanguages(language);
         const textBlocks = displayLanguages.map((displayLanguage) => `
                 <div class="excerpt-block">
@@ -333,6 +392,7 @@ function renderItems(items, language) {
         <article class="result">
             <span class="result-kind">Matched in ${escapeHtml(languageLabel)}</span>
             <h2>${escapeHtml(item.title)}</h2>
+            ${renderSourceControl(item, resultId)}
             <p class="result-path">Pagefind source: ${escapeHtml(item.url || "-")}</p>
             <p class="result-hash">hash: ${escapeHtml(item.hash || "-")}</p>
             <div class="excerpt-group">
@@ -341,6 +401,78 @@ ${textBlocks}
         </article>
     `;
     }).join("");
+}
+
+async function loadResultContext(item) {
+    return {
+        status: "empty",
+        title: item.origin || getSourceTypeLabel(item.sourceType),
+        subtitle: `hash: ${item.contextParams?.hash || item.hash || "-"} · source: ${getSourceTypeLabel(item.sourceType)}`,
+        message: "详细上下文接口尚未接入。后续可在 loadResultContext(item) 中根据 contextKey/contextParams 拉取对话、阅读物或字幕上下文。",
+        rows: [
+            {
+                speaker: "角色",
+                chs: "这里将显示简体中文上下文，并对命中词预留高亮。",
+                en: "English context will appear here with highlighted hits."
+            }
+        ]
+    };
+}
+
+function renderContextDrawer(state) {
+    drawerTitle.textContent = state.title || "详细上下文";
+    drawerSubtitle.textContent = state.subtitle || "";
+
+    if (state.status === "loading") {
+        drawerContent.innerHTML = '<div class="context-empty">正在加载上下文...</div>';
+        return;
+    }
+
+    const rows = Array.isArray(state.rows) ? state.rows : [];
+    const skeletonRows = rows.map((row) => `
+        <div class="context-row">
+            <div class="context-cell">${escapeHtml(row.speaker || "-")}</div>
+            <div class="context-cell">${escapeHtml(row.chs || "待接入")}</div>
+            <div class="context-cell">${escapeHtml(row.en || "Pending")}</div>
+        </div>
+    `).join("");
+
+    drawerContent.innerHTML = `
+        <div class="context-empty">${escapeHtml(state.message || "详细上下文待接入。")}</div>
+        <div class="context-skeleton" aria-label="上下文表格占位">
+            <div class="context-row is-header">
+                <div class="context-cell">角色</div>
+                <div class="context-cell">简体中文</div>
+                <div class="context-cell">English</div>
+            </div>
+            ${skeletonRows}
+        </div>
+    `;
+}
+
+async function openContextDrawer(item) {
+    drawerBackdrop.hidden = false;
+    requestAnimationFrame(() => {
+        drawerBackdrop.classList.add("is-open");
+    });
+    renderContextDrawer({
+        status: "loading",
+        title: item.origin || "详细上下文",
+        subtitle: `hash: ${item.hash || "-"}`
+    });
+
+    const contextState = await loadResultContext(item);
+    renderContextDrawer(contextState);
+    drawerClose.focus();
+}
+
+function closeContextDrawer() {
+    drawerBackdrop.classList.remove("is-open");
+    window.setTimeout(() => {
+        if (!drawerBackdrop.classList.contains("is-open")) {
+            drawerBackdrop.hidden = true;
+        }
+    }, 240);
 }
 
 async function ensureReady(language) {
@@ -353,7 +485,7 @@ async function ensureReady(language) {
     await pagefind.init();
     initializedLanguage = language;
     activeLanguage = language;
-    status.textContent = `${getLanguageLabel(language)} index is ready. Click Search or press Enter to run a query.`;
+    status.textContent = `${getLanguageLabel(language)} 索引已就绪。点击 Search 或按 Enter 开始检索。`;
 }
 
 async function runSearch(term, language) {
@@ -363,13 +495,13 @@ async function runSearch(term, language) {
     const exactKeyword = wrapExactQuery(processedKeyword);
 
     if (!keyword) {
-        status.textContent = "Enter a keyword to search.";
-        setPlaceholder("Results will appear here. The selected language index will be queried, then display text will be loaded from text-data buckets.");
+        status.textContent = "请输入关键词。";
+        setPlaceholder("结果会显示在这里。页面将查询所选语言索引，并从 text-data 文本桶加载展示文本。");
         return;
     }
 
-    status.textContent = `Searching ${getLanguageLabel(language)} for "${keyword}" with exact query ${exactKeyword} ...`;
-    setPlaceholder("Loading matching index shards and text buckets on demand...");
+    status.textContent = `正在用 ${getLanguageLabel(language)} 检索 "${keyword}"，精确查询为 ${exactKeyword} ...`;
+    setPlaceholder("正在按需加载匹配索引分片和文本桶...");
 
     try {
         await ensureReady(language);
@@ -380,8 +512,8 @@ async function runSearch(term, language) {
         }
 
         if (!search.results.length) {
-            status.textContent = `No results for "${keyword}" in ${getLanguageLabel(language)}.`;
-            setPlaceholder("No match found. Try a shorter or more common keyword.");
+            status.textContent = `${getLanguageLabel(language)} 中没有找到 "${keyword}"。`;
+            setPlaceholder("没有找到匹配结果。可以尝试更短或更常见的关键词。");
             return;
         }
 
@@ -396,17 +528,17 @@ async function runSearch(term, language) {
         }
 
         if (!filteredItems.length) {
-            status.textContent = `No continuously matched results for "${keyword}" in ${getLanguageLabel(language)}.`;
-            setPlaceholder("Pagefind found coarse matches, but none survived the front-end contiguous-match filter.");
+            status.textContent = `${getLanguageLabel(language)} 中没有找到连续命中的 "${keyword}"。`;
+            setPlaceholder("Pagefind 找到了粗略匹配，但没有结果通过前端连续命中过滤。");
             return;
         }
 
-        status.textContent = `Found ${filteredItems.length} rendered result(s) from ${search.results.length} Pagefind group match(es) in ${getLanguageLabel(language)}.`;
+        status.textContent = `在 ${getLanguageLabel(language)} 中找到 ${filteredItems.length} 条展示结果，来自 ${search.results.length} 个 Pagefind 分组命中。`;
         renderItems(filteredItems, language);
     } catch (error) {
         console.error(error);
-        status.textContent = "Search failed. Open this page through an HTTP server instead of double-clicking the HTML file.";
-        setPlaceholder("Initialization or search failed. Check DevTools for missing <code>pagefind</code> or <code>text-data</code> requests.");
+        status.textContent = "搜索失败。请通过 HTTP server 打开本页面，不要直接双击 HTML 文件。";
+        setPlaceholder("初始化或搜索失败。请在 DevTools 中检查 <code>pagefind</code> 或 <code>text-data</code> 请求是否缺失。");
     }
 }
 
@@ -422,21 +554,49 @@ form.addEventListener("submit", (event) => {
 languageSelect.addEventListener("change", async () => {
     const language = languageSelect.value;
     syncLanguageUI(language);
-    status.textContent = `Switching to ${getLanguageLabel(language)} index...`;
-    setPlaceholder("Results will appear here after you run a search.");
+    status.textContent = `正在切换到 ${getLanguageLabel(language)} 索引...`;
+    setPlaceholder("运行搜索后，结果会显示在这里。");
 
     try {
         await ensureReady(language);
     } catch (error) {
         console.error(error);
-        status.textContent = `Failed to switch to ${getLanguageLabel(language)} index.`;
+        status.textContent = `切换到 ${getLanguageLabel(language)} 索引失败。`;
+    }
+});
+
+results.addEventListener("click", (event) => {
+    const button = event.target.closest(".origin-action[data-result-id]");
+
+    if (!button || button.disabled) {
+        return;
+    }
+
+    const item = renderedItems.get(button.dataset.resultId);
+
+    if (item) {
+        openContextDrawer(item);
+    }
+});
+
+drawerClose.addEventListener("click", closeContextDrawer);
+
+drawerBackdrop.addEventListener("click", (event) => {
+    if (!contextDrawer.contains(event.target)) {
+        closeContextDrawer();
+    }
+});
+
+document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !drawerBackdrop.hidden) {
+        closeContextDrawer();
     }
 });
 
 syncLanguageUI(activeLanguage);
-setPlaceholder("Results will appear here. The selected language index will be queried, then display text will be loaded from text-data buckets.");
+setPlaceholder("结果会显示在这里。页面将查询所选语言索引，并从 text-data 文本桶加载展示文本。");
 ensureReady(activeLanguage).catch((error) => {
     console.error(error);
-    status.textContent = "Pagefind initialization failed. Serve this directory over HTTP.";
-    setPlaceholder("Could not load the selected <code>./pagefind/&lt;language&gt;/pagefind.js</code> assets.");
+    status.textContent = "Pagefind 初始化失败。请通过 HTTP server 提供此目录。";
+    setPlaceholder("无法加载所选的 <code>./pagefind/&lt;language&gt;/pagefind.js</code> 资源。");
 });

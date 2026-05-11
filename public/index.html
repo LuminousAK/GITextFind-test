@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Pagefind Text Bucket Demo</title>
+    <title>GI Text Search Demo</title>
     <style>
         :root {
             --bg: #f4efe6;
@@ -144,6 +144,45 @@
             text-decoration: none;
         }
 
+        .result-source {
+            margin: 10px 0 8px;
+            font-size: 0.92rem;
+            color: var(--muted);
+        }
+
+        .origin-action {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            min-height: 30px;
+            padding: 0;
+            border: 0;
+            border-radius: 0;
+            color: var(--muted);
+            background: transparent;
+            font: inherit;
+            font-weight: 600;
+            cursor: default;
+        }
+
+        .origin-action.is-clickable {
+            color: var(--accent);
+            cursor: pointer;
+        }
+
+        .origin-action.is-clickable:hover {
+            text-decoration: underline;
+        }
+
+        .origin-arrow {
+            display: inline-block;
+            transition: transform 0.2s ease;
+        }
+
+        .origin-action.is-clickable:hover .origin-arrow {
+            transform: translateX(4px);
+        }
+
         .result-path,
         .result-hash {
             margin: 4px 0;
@@ -192,6 +231,124 @@
             background: rgba(47, 36, 27, 0.08);
         }
 
+        .drawer-backdrop {
+            position: fixed;
+            inset: 0;
+            z-index: 20;
+            display: grid;
+            justify-items: end;
+            background: rgba(47, 36, 27, 0.28);
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s ease;
+        }
+
+        .drawer-backdrop.is-open {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .context-drawer {
+            width: min(560px, calc(100vw - 28px));
+            height: 100vh;
+            padding: 22px;
+            overflow: auto;
+            border-left: 1px solid var(--line);
+            background: #fffaf4;
+            box-shadow: -24px 0 60px rgba(77, 51, 31, 0.2);
+            transform: translateX(100%);
+            transition: transform 0.24s ease;
+        }
+
+        .drawer-backdrop.is-open .context-drawer {
+            transform: translateX(0);
+        }
+
+        .drawer-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 16px;
+            margin-bottom: 18px;
+        }
+
+        .drawer-title {
+            margin: 0 0 6px;
+            font-size: 1.3rem;
+            line-height: 1.3;
+        }
+
+        .drawer-subtitle {
+            margin: 0;
+            color: var(--muted);
+            font-size: 0.92rem;
+            line-height: 1.5;
+            word-break: break-all;
+        }
+
+        .drawer-close {
+            display: inline-grid;
+            place-items: center;
+            width: 38px;
+            height: 38px;
+            flex: 0 0 auto;
+            padding: 0;
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            color: var(--text);
+            background: rgba(255, 255, 255, 0.78);
+            font-size: 1.4rem;
+            line-height: 1;
+        }
+
+        .context-empty {
+            padding: 18px;
+            border: 1px dashed var(--line);
+            border-radius: 16px;
+            color: var(--muted);
+            background: rgba(244, 239, 230, 0.72);
+            line-height: 1.7;
+        }
+
+        .context-skeleton {
+            margin-top: 16px;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            overflow: hidden;
+            background: rgba(255, 255, 255, 0.72);
+        }
+
+        .context-row {
+            display: grid;
+            grid-template-columns: 96px minmax(0, 1fr) minmax(0, 1fr);
+            gap: 1px;
+            background: var(--line);
+        }
+
+        .context-row + .context-row {
+            border-top: 1px solid var(--line);
+        }
+
+        .context-cell {
+            min-width: 0;
+            padding: 12px;
+            background: #fffaf4;
+            color: var(--muted);
+            line-height: 1.55;
+        }
+
+        .context-row.is-header .context-cell {
+            color: #7a4526;
+            font-size: 0.86rem;
+            font-weight: 700;
+            background: rgba(180, 77, 30, 0.08);
+        }
+
+        .context-hit {
+            color: var(--text);
+            background: var(--accent-soft);
+        }
+
         @media (max-width: 700px) {
             .shell {
                 margin: 18px auto;
@@ -201,15 +358,42 @@
             .searchbar {
                 grid-template-columns: 1fr;
             }
+
+            .drawer-backdrop {
+                align-items: end;
+                justify-items: stretch;
+            }
+
+            .context-drawer {
+                width: 100%;
+                height: min(82vh, 680px);
+                border-top: 1px solid var(--line);
+                border-left: 0;
+                border-radius: 20px 20px 0 0;
+                box-shadow: 0 -24px 60px rgba(77, 51, 31, 0.2);
+                transform: translateY(100%);
+            }
+
+            .drawer-backdrop.is-open .context-drawer {
+                transform: translateY(0);
+            }
+
+            .context-row {
+                grid-template-columns: 82px minmax(0, 1fr);
+            }
+
+            .context-row .context-cell:nth-child(3) {
+                grid-column: 2;
+                border-top: 1px solid var(--line);
+            }
         }
     </style>
 </head>
 <body>
     <main class="shell">
-        <h1>Pagefind Text Bucket Demo</h1>
+        <h1>GI Text Search Demo</h1>
         <p class="lead">
-            This page can search either the Simplified Chinese or English Pagefind index.
-            Results are matched with the selected language index, then display text is loaded from language-specific hash buckets.
+            选择简体中文或 English 索引进行检索，命中后从对应语言的文本桶加载展示文本。
         </p>
 
         <form class="searchbar" id="search-form">
@@ -230,12 +414,25 @@
         <div class="meta-bar">
             <span class="tip">Index root: <code>./pagefind/&lt;language&gt;/</code></span>
             <span class="tip">Text data: <code>./text-data/&lt;language&gt;/&lt;bucket&gt;.json</code></span>
-            <span class="tip">Render mode: <code>show search language + 简体中文 + English</code></span>
+            <span class="tip">Render mode: <code>search language + 简体中文 + English</code></span>
         </div>
 
         <div id="status" class="status">Initializing Pagefind...</div>
         <section id="results" class="results" aria-live="polite"></section>
     </main>
+
+    <div id="drawer-backdrop" class="drawer-backdrop" hidden>
+        <aside id="context-drawer" class="context-drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+            <div class="drawer-header">
+                <div>
+                    <h2 id="drawer-title" class="drawer-title">详细上下文</h2>
+                    <p id="drawer-subtitle" class="drawer-subtitle">等待选择结果来源。</p>
+                </div>
+                <button id="drawer-close" class="drawer-close" type="button" aria-label="关闭上下文">×</button>
+            </div>
+            <div id="drawer-content"></div>
+        </aside>
+    </div>
 
     <script type="module" src="./app.js"></script>
 </body>
