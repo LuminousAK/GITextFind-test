@@ -1,4 +1,4 @@
-import * as pagefind from "pagefind";
+﻿import * as pagefind from "pagefind";
 import fs from "fs";
 import path from "path";
 
@@ -9,24 +9,157 @@ const PAGEFIND_OUTPUT_ROOT = path.resolve("./public/pagefind");
 const TEXT_DATA_OUTPUT_ROOT = path.resolve("./public/text-data");
 const TEMP_INDEX_OUTPUT_ROOT = path.resolve("./.tmp-pagefind-html");
 const LEGACY_CHUNK_OUTPUT_ROOT = path.resolve("./public/chunk");
+const TEXTMAP_SOURCE_ROOT = path.resolve("./TextMap");
+const READABLE_SOURCE_ROOT = path.resolve("./Readable");
+const SUBTITLE_SOURCE_ROOT = path.resolve("./Subtitle");
+const DEFAULT_LANGUAGE_IDS = ["chs", "en"];
+const TEXTMAP_FILE_RE = /^TextMap(?:_Medium)?([A-Za-z]+)(?:_(\d+))?\.json$/;
+const SUBTITLE_TIME_RE = /\d{2}:\d{2}:\d{2}[,.]\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}[,.]\d{3}/;
 
-const LANGUAGE_CONFIGS = [
-    {
-        id: "chs",
-        label: "简体中文",
-        sourceFile: "TextMapCHS.json"
-    },
-    {
-        id: "en",
-        label: "English",
-        sourceFile: "TextMapEN.json"
+const LANGUAGE_LABELS = {
+    chs: "简体中文",
+    cht: "Traditional Chinese",
+    de: "German",
+    en: "English",
+    es: "Spanish",
+    fr: "French",
+    id: "Indonesian",
+    it: "Italian",
+    jp: "Japanese",
+    kr: "Korean",
+    pt: "Portuguese",
+    ru: "Russian",
+    th: "Thai",
+    tr: "Turkish",
+    vi: "Vietnamese"
+};
+
+function normalizeLanguageId(value) {
+    return String(value ?? "").trim().toLowerCase();
+}
+
+function toPosixPath(value) {
+    return value.split(path.sep).join("/");
+}
+
+function getNormalizedRelativePath(relativePath, languageId) {
+    const sufffixRegix = new RegExp(`_${languageId}(?=\\.[^.]+$)`, "i");
+    return relativePath.replace(sufffixRegix, "");
+}
+
+function parseRequestedLanguageIds(argv) {
+    if (argv.includes("--all-languages") || argv.includes("--all-langs")) {
+        return null;
     }
-].map((config) => ({
-    ...config,
-    pagefindOutputDir: path.join(PAGEFIND_OUTPUT_ROOT, config.id),
-    textDataOutputDir: path.join(TEXT_DATA_OUTPUT_ROOT, config.id),
-    tempIndexOutputDir: path.join(TEMP_INDEX_OUTPUT_ROOT, config.id)
-}));
+
+    const languageArgIndex = argv.findIndex((arg) => (
+        arg === "--languages"
+        || arg === "--langs"
+        || arg.startsWith("--languages=")
+        || arg.startsWith("--langs=")
+    ));
+
+    if (languageArgIndex === -1) {
+        return DEFAULT_LANGUAGE_IDS;
+    }
+
+    const languageArg = argv[languageArgIndex];
+    const rawLanguages = languageArg.includes("=")
+        ? languageArg.slice(languageArg.indexOf("=") + 1)
+        : argv[languageArgIndex + 1] ?? "";
+    const languageIds = rawLanguages
+        .split(",")
+        .map(normalizeLanguageId)
+        .filter(Boolean);
+
+    if (languageIds.length === 0) {
+        throw new Error("No languages were provided. Use --languages=chs,en or --all-languages.");
+    }
+
+    return languageIds;
+}
+
+function compareTextMapFiles(left, right) {
+    return (
+        left.familyOrder - right.familyOrder
+        || left.sequence - right.sequence
+        || left.fileName.localeCompare(right.fileName)
+    );
+}
+
+function discoverLanguageConfigs(requestedLanguageIds = DEFAULT_LANGUAGE_IDS) {
+    const languagesById = new Map();
+
+    function ensureLanguageConfig(id) {
+        if (!languagesById.has(id)) {
+            languagesById.set(id, {
+                id,
+                label: LANGUAGE_LABELS[id] ?? id.toUpperCase(),
+                sourceFiles: []
+            });
+        }
+
+        return languagesById.get(id);
+    }
+
+    if (fs.existsSync(TEXTMAP_SOURCE_ROOT)) {
+        for (const fileName of fs.readdirSync(TEXTMAP_SOURCE_ROOT)) {
+            const match = TEXTMAP_FILE_RE.exec(fileName);
+
+            if (!match) {
+                continue;
+            }
+
+            const id = normalizeLanguageId(match[1]);
+            const isMedium = fileName.startsWith("TextMap_Medium");
+            const sequence = match[2] === undefined ? -1 : Number(match[2]);
+
+            ensureLanguageConfig(id).sourceFiles.push({
+                fileName,
+                filePath: path.join(TEXTMAP_SOURCE_ROOT, fileName),
+                familyOrder: isMedium ? 1 : 0,
+                sequence
+            });
+        }
+    }
+
+    for (const sourceRoot of [READABLE_SOURCE_ROOT, SUBTITLE_SOURCE_ROOT]) {
+        if (!fs.existsSync(sourceRoot)) {
+            continue;
+        }
+
+        for (const dirent of fs.readdirSync(sourceRoot, { withFileTypes: true })) {
+            if (dirent.isDirectory()) {
+                ensureLanguageConfig(normalizeLanguageId(dirent.name));
+            }
+        }
+    }
+
+    const allLanguageConfigs = Array.from(languagesById.values())
+        .map((config) => ({
+            ...config,
+            sourceFiles: config.sourceFiles.sort(compareTextMapFiles),
+            readableSourceDir: path.join(READABLE_SOURCE_ROOT, config.id.toUpperCase()),
+            subtitleSourceDir: path.join(SUBTITLE_SOURCE_ROOT, config.id.toUpperCase()),
+            pagefindOutputDir: path.join(PAGEFIND_OUTPUT_ROOT, config.id),
+            textDataOutputDir: path.join(TEXT_DATA_OUTPUT_ROOT, config.id),
+            tempIndexOutputDir: path.join(TEMP_INDEX_OUTPUT_ROOT, config.id)
+        }))
+        .sort((left, right) => left.id.localeCompare(right.id));
+
+    if (requestedLanguageIds === null) {
+        return allLanguageConfigs;
+    }
+
+    const allLanguageConfigsById = new Map(allLanguageConfigs.map((config) => [config.id, config]));
+    const missingLanguageIds = requestedLanguageIds.filter((id) => !allLanguageConfigsById.has(id));
+
+    if (missingLanguageIds.length > 0) {
+        throw new Error(`No TextMap files found for language(s): ${missingLanguageIds.join(", ")}`);
+    }
+
+    return requestedLanguageIds.map((id) => allLanguageConfigsById.get(id));
+}
 
 function escapeHtml(value) {
     return String(value).replace(/[&<>"']/g, (char) => {
@@ -182,7 +315,7 @@ async function buildIndexDocument(languageConfig, bucketId, bucketEntriesForLang
         bucketEntriesForLanguage,
         PREPROCESS_CONCURRENCY,
         async (entry) => {
-            const headingId = `hash-${entry.hash}`;
+            const headingId = makeHeadingId(entry.hash);
             const processedText = preprocessForCharacterSearch(entry.searchText);
 
             return [
@@ -216,26 +349,171 @@ function resetOutputDirs() {
     fs.mkdirSync(TEMP_INDEX_OUTPUT_ROOT, { recursive: true });
 }
 
-function loadLanguageRecordMap(sourceFile) {
-    const rawData = fs.readFileSync(sourceFile, "utf-8");
-    return JSON.parse(rawData);
+function listFilesRecursive(rootDir, predicate = () => true) {
+    if (!fs.existsSync(rootDir)) {
+        return [];
+    }
+
+    const files = [];
+
+    function visit(currentDir) {
+        for (const dirent of fs.readdirSync(currentDir, { withFileTypes: true })) {
+            const fullPath = path.join(currentDir, dirent.name);
+
+            if (dirent.isDirectory()) {
+                visit(fullPath);
+            } else if (dirent.isFile() && predicate(fullPath)) {
+                files.push(fullPath);
+            }
+        }
+    }
+
+    visit(rootDir);
+    return files.sort((left, right) => left.localeCompare(right));
+}
+
+function normalizeSourceText(value) {
+    return String(value ?? "")
+        .replace(/\r\n?/g, "\n")
+        .replace(/\\n/g, "\n")
+        .trim();
+}
+
+function makeRecordId(sourceType, relativePath, suffix = "") {
+    return suffix ? `${sourceType}:${relativePath}:${suffix}` : `${sourceType}:${relativePath}`;
+}
+
+function makeHeadingId(recordId) {
+    return `hash-${encodeURIComponent(recordId)}`;
+}
+
+function loadTextMapRecords(languageConfig) {
+    const records = [];
+
+    for (const sourceFile of languageConfig.sourceFiles) {
+        const rawData = fs.readFileSync(sourceFile.filePath, "utf-8");
+        const sourceRecords = JSON.parse(rawData);
+
+        for (const [hash, text] of Object.entries(sourceRecords)) {
+            records.push({
+                id: hash,
+                sourceType: "textmap",
+                text: normalizeSourceText(text)
+            });
+        }
+    }
+
+    return records;
+}
+
+function loadReadableRecords(languageConfig) {
+    return listFilesRecursive(
+        languageConfig.readableSourceDir,
+        (filePath) => path.extname(filePath).toLowerCase() === ".txt"
+    ).map((filePath) => {
+        const relativePath = toPosixPath(path.relative(languageConfig.readableSourceDir, filePath));
+
+        const normalizedPath = getNormalizedRelativePath(relativePath, languageConfig.id);
+        
+        return {
+            id: makeRecordId("readable", normalizedPath),
+            sourceType: "readable",
+            text: normalizeSourceText(fs.readFileSync(filePath, "utf-8"))
+        };
+    });
+}
+
+function parseSubtitleSegments(content) {
+    const normalized = normalizeSourceText(content);
+
+    if (!normalized) {
+        return [];
+    }
+
+    return normalized
+        .split(/\n\s*\n/g)
+        .map((block) => block.split("\n").map((line) => line.trim()).filter(Boolean))
+        .map((lines) => {
+            const timeLineIndex = lines.findIndex((line) => SUBTITLE_TIME_RE.test(line));
+
+            if (timeLineIndex === -1) {
+                return null;
+            }
+
+            const text = lines.slice(timeLineIndex + 1).join("\n").trim();
+
+            if (!text) {
+                return null;
+            }
+
+            const timeRange = lines[timeLineIndex]
+            const timeMatch = timeRange.match(/^(\d{2}:\d{2}:\d{2})/);
+            const timeKey = timeMatch ? timeMatch[1].replace(/:/g, "-") : "";
+
+            return {
+                sequence: lines[0] ?? "",
+                timeRange,
+                timeKey,
+                text
+            };
+        })
+        .filter(Boolean);
+}
+
+function loadSubtitleRecords(languageConfig) {
+    return listFilesRecursive(
+        languageConfig.subtitleSourceDir,
+        (filePath) => path.extname(filePath).toLowerCase() === ".srt"
+    ).flatMap((filePath) => {
+        const relativePath = toPosixPath(path.relative(languageConfig.subtitleSourceDir, filePath));
+        
+        const normalizedPath = getNormalizedRelativePath(relativePath, languageConfig.id);
+        
+        const segments = parseSubtitleSegments(fs.readFileSync(filePath, "utf-8"));
+
+        return segments.map((segment, index) => ({
+
+            id: makeRecordId("subtitle", normalizedPath, String(segment.timeKey || index + 1).padStart(6, "0")),
+            sourceType: "subtitle",
+            text: segment.text
+        }));
+    });
+}
+
+function loadLanguageRecords(languageConfig) {
+    const records = [
+        ...loadTextMapRecords(languageConfig),
+        ...loadReadableRecords(languageConfig),
+        ...loadSubtitleRecords(languageConfig)
+    ];
+
+    const uniqueRecordsById = new Map();
+
+    for (const record of records) {
+        if (record.text.trim()) {
+            uniqueRecordsById.set(record.id, record);
+        }
+    }
+
+    return Array.from(uniqueRecordsById.values())
+        .sort((left, right) => left.id.localeCompare(right.id));
 }
 
 function buildSearchEntries(languageRecords) {
-    return Object.entries(languageRecords)
-        .map(([hash, searchText]) => ({
-            hash,
-            searchText: String(searchText ?? "")
+    return languageRecords
+        .map((record) => ({
+            hash: record.id,
+            searchText: String(record.text ?? "")
         }))
         .filter((entry) => entry.searchText.trim())
         .sort((left, right) => left.hash.localeCompare(right.hash));
 }
 
 async function writeLanguageTextData(languageConfig, languageRecords) {
-    const entries = Object.entries(languageRecords)
-        .map(([hash, text]) => ({
-            hash,
-            text: String(text ?? "")
+    const entries = languageRecords
+        .map((record) => ({
+            hash: record.id,
+            text: String(record.text ?? "")
         }))
         .sort((left, right) => left.hash.localeCompare(right.hash));
     const buckets = bucketEntries(entries);
@@ -267,14 +545,20 @@ async function writeLanguageTextData(languageConfig, languageRecords) {
     );
 }
 
-function writeTextDataManifest() {
+function writeTextDataManifest(languageConfigs) {
     const manifest = {
         bucketCount: BUCKET_COUNT,
         pathTemplate: "text-data/{language}/{bucket}.json",
-        languages: LANGUAGE_CONFIGS.map((config) => ({
+        languages: languageConfigs.map((config) => ({
             id: config.id,
             label: config.label,
-            sourceFile: config.sourceFile
+            sourceFiles: config.sourceFiles.map((sourceFile) => sourceFile.fileName),
+            readableSourceDir: fs.existsSync(config.readableSourceDir)
+                ? toPosixPath(path.relative(process.cwd(), config.readableSourceDir))
+                : null,
+            subtitleSourceDir: fs.existsSync(config.subtitleSourceDir)
+                ? toPosixPath(path.relative(process.cwd(), config.subtitleSourceDir))
+                : null
         }))
     };
 
@@ -349,17 +633,28 @@ async function buildLanguageIndex(languageConfig, languageRecords) {
 }
 
 async function buildAllIndexes() {
-    console.log("Reading language JSON files...");
-    const languageMaps = Object.fromEntries(
-        LANGUAGE_CONFIGS.map((config) => [config.id, loadLanguageRecordMap(config.sourceFile)])
+    const requestedLanguageIds = parseRequestedLanguageIds(process.argv.slice(2));
+    const languageConfigs = discoverLanguageConfigs(requestedLanguageIds);
+
+    console.log(`Discovered ${languageConfigs.length} language(s): ${languageConfigs.map((config) => config.id).join(", ")}`);
+    for (const languageConfig of languageConfigs) {
+        console.log(
+            `[${languageConfig.id}] TextMap files: `
+            + languageConfig.sourceFiles.map((sourceFile) => sourceFile.fileName).join(", ")
+        );
+    }
+
+    console.log("Reading text sources...");
+    const languageRecordsById = Object.fromEntries(
+        languageConfigs.map((config) => [config.id, loadLanguageRecords(config)])
     );
 
     resetOutputDirs();
-    writeTextDataManifest();
+    writeTextDataManifest(languageConfigs);
 
-    for (const languageConfig of LANGUAGE_CONFIGS) {
-        await writeLanguageTextData(languageConfig, languageMaps[languageConfig.id]);
-        await buildLanguageIndex(languageConfig, languageMaps[languageConfig.id]);
+    for (const languageConfig of languageConfigs) {
+        await writeLanguageTextData(languageConfig, languageRecordsById[languageConfig.id]);
+        await buildLanguageIndex(languageConfig, languageRecordsById[languageConfig.id]);
     }
 
     fs.rmSync(TEMP_INDEX_OUTPUT_ROOT, { force: true, recursive: true });

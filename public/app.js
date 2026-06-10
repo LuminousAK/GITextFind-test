@@ -264,26 +264,85 @@ async function hydrateOriginalTexts(items, language) {
     }));
 }
 
-function extractHashFromResult(subResult) {
-    const fromUrl = subResult.url?.match(/#hash-([^#/?]+)/)?.[1];
+function extractRecordIdFromResult(subResult) {
+    const fromTitle = String(subResult.title || "").trim();
 
-    if (fromUrl) {
-        return decodeURIComponent(fromUrl);
+    if (fromTitle) {
+        return fromTitle;
     }
 
-    return subResult.title || "unknown";
+    const fromUrl = subResult.url?.match(/#hash-(.+)$/)?.[1];
+
+    if (fromUrl) {
+        try {
+            return decodeURIComponent(fromUrl);
+        } catch {
+            return fromUrl;
+        }
+    }
+
+    return "unknown";
+}
+
+function parseRecordId(recordId) {
+    const id = String(recordId || "unknown");
+
+    if (id.startsWith("readable:")) {
+        const sourceId = id.slice("readable:".length);
+
+        return {
+            sourceType: "readable",
+            sourceId,
+            originDetail: sourceId
+        };
+    }
+
+    if (id.startsWith("subtitle:")) {
+        const value = id.slice("subtitle:".length);
+        const separatorIndex = value.lastIndexOf(":");
+        const sourceId = separatorIndex === -1 ? value : value.slice(0, separatorIndex);
+        const segment = separatorIndex === -1 ? "" : value.slice(separatorIndex + 1);
+
+        return {
+            sourceType: "subtitle",
+            sourceId,
+            segment,
+            originDetail: segment ? `${sourceId} #${segment}` : sourceId
+        };
+    }
+
+    if (id.startsWith("textmap:")) {
+        const sourceId = id.slice("textmap:".length);
+
+        return {
+            sourceType: "textmap",
+            sourceId,
+            originDetail: sourceId
+        };
+    }
+
+    return {
+        sourceType: "textmap",
+        sourceId: id,
+        originDetail: id
+    };
 }
 
 function buildResultSourceMeta(item) {
     const hash = String(item.hash || item.title || "unknown");
+    const sourceMeta = parseRecordId(hash);
 
     return {
-        sourceType: "unknown",
-        origin: `${getSourceTypeLabel("unknown")}：${hash}`,
+        sourceType: sourceMeta.sourceType,
+        origin: `${getSourceTypeLabel(sourceMeta.sourceType)}: ${sourceMeta.originDetail}`,
         canOpenContext: true,
         contextKey: hash,
         contextParams: {
             hash,
+            recordId: hash,
+            sourceId: sourceMeta.sourceId,
+            segment: sourceMeta.segment || "",
+            sourceType: sourceMeta.sourceType,
             pagefindUrl: item.url || "",
             searchLanguage: item.searchLanguage || activeLanguage
         }
@@ -299,7 +358,7 @@ function flattenResults(searchResults, loadedDocuments, language) {
 
         if (subResults.length) {
             subResults.forEach((subResult) => {
-                const hash = extractHashFromResult(subResult);
+                const hash = extractRecordIdFromResult(subResult);
                 const baseItem = {
                     kind: "hash",
                     title: subResult.title || hash,
@@ -394,7 +453,7 @@ function renderItems(items, language) {
             <h2>${escapeHtml(item.title)}</h2>
             ${renderSourceControl(item, resultId)}
             <p class="result-path">Pagefind source: ${escapeHtml(item.url || "-")}</p>
-            <p class="result-hash">hash: ${escapeHtml(item.hash || "-")}</p>
+            <p class="result-hash">id: ${escapeHtml(item.hash || "-")}</p>
             <div class="excerpt-group">
 ${textBlocks}
             </div>
@@ -407,7 +466,7 @@ async function loadResultContext(item) {
     return {
         status: "empty",
         title: item.origin || getSourceTypeLabel(item.sourceType),
-        subtitle: `hash: ${item.contextParams?.hash || item.hash || "-"} · source: ${getSourceTypeLabel(item.sourceType)}`,
+        subtitle: `id: ${item.contextParams?.recordId || item.hash || "-"} · source: ${getSourceTypeLabel(item.sourceType)}`,
         message: "详细上下文接口尚未接入。后续可在 loadResultContext(item) 中根据 contextKey/contextParams 拉取对话、阅读物或字幕上下文。",
         rows: [
             {
@@ -458,7 +517,7 @@ async function openContextDrawer(item) {
     renderContextDrawer({
         status: "loading",
         title: item.origin || "详细上下文",
-        subtitle: `hash: ${item.hash || "-"}`
+        subtitle: `id: ${item.hash || "-"}`
     });
 
     const contextState = await loadResultContext(item);

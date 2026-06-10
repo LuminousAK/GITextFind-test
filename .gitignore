@@ -1,6 +1,11 @@
 public/chunk/
 public/pagefind/
+public/text-data/
+public/punct-demo/
+.tmp-pagefind-html/
 node_modules/
 dist/
-TextMapCHS.json
-TextMapEN.json
+Readable/
+Subtitle/
+TextMap/
+GITextSearchStatic/
