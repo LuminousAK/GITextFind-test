@@ -1,12 +1,19 @@
-﻿import * as pagefind from "pagefind";
+import * as pagefind from "pagefind";
 import fs from "fs";
 import path from "path";
+import {
+    BUCKET_COUNT,
+    DATA_PATH,
+    buildMetaData,
+    getBucketId,
+    writeMetaBuckets
+} from "./scripts/build_meta.js";
 
-const BUCKET_COUNT = 512;
 const PREPROCESS_CONCURRENCY = 64;
 const INDEX_CONCURRENCY = 4;
 const PAGEFIND_OUTPUT_ROOT = path.resolve("./public/pagefind");
 const TEXT_DATA_OUTPUT_ROOT = path.resolve("./public/text-data");
+const META_DATA_OUTPUT_ROOT = path.resolve("./public/meta-data");
 const TEMP_INDEX_OUTPUT_ROOT = path.resolve("./.tmp-pagefind-html");
 const LEGACY_CHUNK_OUTPUT_ROOT = path.resolve("./public/chunk");
 const TEXTMAP_SOURCE_ROOT = path.resolve("./TextMap");
@@ -14,7 +21,7 @@ const READABLE_SOURCE_ROOT = path.resolve("./Readable");
 const SUBTITLE_SOURCE_ROOT = path.resolve("./Subtitle");
 const DEFAULT_LANGUAGE_IDS = ["chs", "en"];
 const TEXTMAP_FILE_RE = /^TextMap(?:_Medium)?([A-Za-z]+)(?:_(\d+))?\.json$/;
-const SUBTITLE_TIME_RE = /\d{2}:\d{2}:\d{2}[,.]\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}[,.]\d{3}/;
+const SUBTITLE_TIME_RE = /^(\d{2}:\d{2}:\d{2}[,.]\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2}[,.]\d{3})$/;
 
 const LANGUAGE_LABELS = {
     chs: "简体中文",
@@ -43,8 +50,8 @@ function toPosixPath(value) {
 }
 
 function getNormalizedRelativePath(relativePath, languageId) {
-    const sufffixRegix = new RegExp(`_${languageId}(?=\\.[^.]+$)`, "i");
-    return relativePath.replace(sufffixRegix, "");
+    const suffixRegex = new RegExp(`_${languageId}(?=\\.[^.]+$)`, "i");
+    return relativePath.replace(suffixRegex, "");
 }
 
 function parseRequestedLanguageIds(argv) {
@@ -105,7 +112,6 @@ function discoverLanguageConfigs(requestedLanguageIds = DEFAULT_LANGUAGE_IDS) {
     if (fs.existsSync(TEXTMAP_SOURCE_ROOT)) {
         for (const fileName of fs.readdirSync(TEXTMAP_SOURCE_ROOT)) {
             const match = TEXTMAP_FILE_RE.exec(fileName);
-
             if (!match) {
                 continue;
             }
@@ -151,14 +157,14 @@ function discoverLanguageConfigs(requestedLanguageIds = DEFAULT_LANGUAGE_IDS) {
         return allLanguageConfigs;
     }
 
-    const allLanguageConfigsById = new Map(allLanguageConfigs.map((config) => [config.id, config]));
-    const missingLanguageIds = requestedLanguageIds.filter((id) => !allLanguageConfigsById.has(id));
+    const configsById = new Map(allLanguageConfigs.map((config) => [config.id, config]));
+    const missingLanguageIds = requestedLanguageIds.filter((id) => !configsById.has(id));
 
     if (missingLanguageIds.length > 0) {
         throw new Error(`No TextMap files found for language(s): ${missingLanguageIds.join(", ")}`);
     }
 
-    return requestedLanguageIds.map((id) => allLanguageConfigsById.get(id));
+    return requestedLanguageIds.map((id) => configsById.get(id));
 }
 
 function escapeHtml(value) {
@@ -195,12 +201,10 @@ function preprocessForCharacterSearch(input) {
             if (output && output[output.length - 1] !== " ") {
                 output += " ";
             }
-
             continue;
         }
 
         output += char;
-
         const nextChar = normalized[index + 1] ?? "";
         const needsSeparator = (
             (isHan(char) && isHan(nextChar))
@@ -216,22 +220,11 @@ function preprocessForCharacterSearch(input) {
     return output.replace(/\s+/g, " ").trim();
 }
 
-function getBucketId(hash) {
-    let mixedHash = 0x811c9dc5;
-
-    for (let index = 0; index < hash.length; index += 1) {
-        mixedHash ^= hash.charCodeAt(index);
-        mixedHash = Math.imul(mixedHash, 0x01000193);
-    }
-
-    return String((mixedHash >>> 0) % BUCKET_COUNT).padStart(4, "0");
-}
-
-function bucketEntries(entries) {
+function bucketEntries(entries, getBucketKey) {
     const buckets = Array.from({ length: BUCKET_COUNT }, () => []);
 
     for (const entry of entries) {
-        const bucketId = getBucketId(entry.hash);
+        const bucketId = getBucketId(String(getBucketKey(entry)));
         buckets[Number(bucketId)].push(entry);
     }
 
@@ -308,23 +301,28 @@ ${sections.join("\n")}
 </html>`;
 }
 
+function makeHeadingId(pagefindId) {
+    return `hash-${encodeURIComponent(pagefindId)}`;
+}
+
+function buildSearchSection(record) {
+    const headingId = makeHeadingId(record.pagefindId);
+    const processedText = preprocessForCharacterSearch(record.searchText);
+
+    return [
+        "        <section>",
+        `            <h2 id="${escapeHtml(headingId)}">${escapeHtml(record.titleText)}</h2>`,
+        `            <p>${escapeHtml(processedText)}</p>`,
+        "        </section>"
+    ].join("\n");
+}
+
 async function buildIndexDocument(languageConfig, bucketId, bucketEntriesForLanguage) {
     const tempFilePath = path.join(languageConfig.tempIndexOutputDir, bucketId, "index.html");
-
     const sections = await mapWithConcurrency(
         bucketEntriesForLanguage,
         PREPROCESS_CONCURRENCY,
-        async (entry) => {
-            const headingId = makeHeadingId(entry.hash);
-            const processedText = preprocessForCharacterSearch(entry.searchText);
-
-            return [
-                `        <section data-hash="${escapeHtml(entry.hash)}">`,
-                `            <h2 id="${escapeHtml(headingId)}">${escapeHtml(entry.hash)}</h2>`,
-                `            <p>${escapeHtml(processedText)}</p>`,
-                "        </section>"
-            ].join("\n");
-        }
+        async (entry) => buildSearchSection(entry)
     );
 
     return {
@@ -342,6 +340,7 @@ async function buildIndexDocument(languageConfig, bucketId, bucketEntriesForLang
 function resetOutputDirs() {
     fs.rmSync(PAGEFIND_OUTPUT_ROOT, { force: true, recursive: true });
     fs.rmSync(TEXT_DATA_OUTPUT_ROOT, { force: true, recursive: true });
+    fs.rmSync(META_DATA_OUTPUT_ROOT, { force: true, recursive: true });
     fs.rmSync(TEMP_INDEX_OUTPUT_ROOT, { force: true, recursive: true });
     fs.rmSync(LEGACY_CHUNK_OUTPUT_ROOT, { force: true, recursive: true });
     fs.mkdirSync(PAGEFIND_OUTPUT_ROOT, { recursive: true });
@@ -379,53 +378,115 @@ function normalizeSourceText(value) {
         .trim();
 }
 
-function makeRecordId(sourceType, relativePath, suffix = "") {
-    return suffix ? `${sourceType}:${relativePath}:${suffix}` : `${sourceType}:${relativePath}`;
+function parseSrtTimeToMs(value) {
+    const normalized = String(value || "").trim().replace(",", ".");
+    const match = normalized.match(/^(\d{2}):(\d{2}):(\d{2})\.(\d{3})$/);
+    if (!match) {
+        return 0;
+    }
+
+    const [, hh, mm, ss, ms] = match;
+    return Number(hh) * 3600000 + Number(mm) * 60000 + Number(ss) * 1000 + Number(ms);
 }
 
-function makeHeadingId(recordId) {
-    return `hash-${encodeURIComponent(recordId)}`;
+function makeSubtitleTimeKey(startMs, index) {
+    return `${String(startMs).padStart(9, "0")}-${String(index + 1).padStart(4, "0")}`;
 }
 
-function loadTextMapRecords(languageConfig) {
-    const records = [];
+function loadFullTextMap(languageConfig) {
+    const textMap = {};
 
     for (const sourceFile of languageConfig.sourceFiles) {
         const rawData = fs.readFileSync(sourceFile.filePath, "utf-8");
         const sourceRecords = JSON.parse(rawData);
 
         for (const [hash, text] of Object.entries(sourceRecords)) {
-            records.push({
-                id: hash,
-                sourceType: "textmap",
-                text: normalizeSourceText(text)
-            });
+            textMap[String(hash)] = normalizeSourceText(text);
         }
     }
 
-    return records;
+    return textMap;
+}
+
+function makeTextMapRecord(hash, text, metaData) {
+    const talkId = metaData.primaryTalkByHash.get(hash);
+
+    if (talkId !== undefined) {
+        return {
+            sourceType: "talk",
+            pagefindId: `talk:${talkId}:${hash}`,
+            textDataKey: hash,
+            bucketKey: String(talkId),
+            titleText: hash,
+            searchText: text,
+            text
+        };
+    }
+
+    if (metaData.fetterMap.has(hash)) {
+        return {
+            sourceType: "fetter",
+            pagefindId: `fetter:${hash}`,
+            textDataKey: hash,
+            bucketKey: `fetter:${hash}`,
+            titleText: hash,
+            searchText: text,
+            text
+        };
+    }
+
+    return {
+        sourceType: "textmap",
+        pagefindId: `textmap:${hash}`,
+        textDataKey: hash,
+        bucketKey: `textmap:${hash}`,
+        titleText: hash,
+        searchText: text,
+        text
+    };
+}
+
+function loadTextMapRecords(languageConfig, metaData) {
+    const textMap = loadFullTextMap(languageConfig);
+    const records = [];
+
+    for (const [hash, text] of Object.entries(textMap)) {
+        if (!text.trim()) {
+            continue;
+        }
+
+        records.push(makeTextMapRecord(hash, text, metaData));
+    }
+
+    return { records, textMap };
 }
 
 function loadReadableRecords(languageConfig) {
     return listFilesRecursive(
         languageConfig.readableSourceDir,
         (filePath) => path.extname(filePath).toLowerCase() === ".txt"
-    ).map((filePath) => {
-        const relativePath = toPosixPath(path.relative(languageConfig.readableSourceDir, filePath));
+    )
+        .map((filePath) => {
+            const relativePath = toPosixPath(path.relative(languageConfig.readableSourceDir, filePath));
+            const normalizedPath = getNormalizedRelativePath(relativePath, languageConfig.id);
+            const pagefindId = `readable:${normalizedPath}`;
+            const text = normalizeSourceText(fs.readFileSync(filePath, "utf-8"));
 
-        const normalizedPath = getNormalizedRelativePath(relativePath, languageConfig.id);
-        
-        return {
-            id: makeRecordId("readable", normalizedPath),
-            sourceType: "readable",
-            text: normalizeSourceText(fs.readFileSync(filePath, "utf-8"))
-        };
-    });
+            return {
+                sourceType: "readable",
+                pagefindId,
+                textDataKey: pagefindId,
+                bucketKey: pagefindId,
+                titleText: "readable",
+                searchText: text,
+                text
+            };
+        })
+        .filter((record) => record.text.trim());
 }
 
 function parseSubtitleSegments(content) {
     const normalized = normalizeSourceText(content);
-
     if (!normalized) {
         return [];
     }
@@ -435,25 +496,26 @@ function parseSubtitleSegments(content) {
         .map((block) => block.split("\n").map((line) => line.trim()).filter(Boolean))
         .map((lines) => {
             const timeLineIndex = lines.findIndex((line) => SUBTITLE_TIME_RE.test(line));
-
             if (timeLineIndex === -1) {
                 return null;
             }
 
             const text = lines.slice(timeLineIndex + 1).join("\n").trim();
-
             if (!text) {
                 return null;
             }
 
-            const timeRange = lines[timeLineIndex]
-            const timeMatch = timeRange.match(/^(\d{2}:\d{2}:\d{2})/);
-            const timeKey = timeMatch ? timeMatch[1].replace(/:/g, "-") : "";
+            const timeRange = lines[timeLineIndex];
+            const timeMatch = SUBTITLE_TIME_RE.exec(timeRange);
+            if (!timeMatch) {
+                return null;
+            }
 
+            const startMs = parseSrtTimeToMs(timeMatch[1]);
             return {
                 sequence: lines[0] ?? "",
                 timeRange,
-                timeKey,
+                startMs,
                 text
             };
         })
@@ -466,73 +528,147 @@ function loadSubtitleRecords(languageConfig) {
         (filePath) => path.extname(filePath).toLowerCase() === ".srt"
     ).flatMap((filePath) => {
         const relativePath = toPosixPath(path.relative(languageConfig.subtitleSourceDir, filePath));
-        
         const normalizedPath = getNormalizedRelativePath(relativePath, languageConfig.id);
-        
         const segments = parseSubtitleSegments(fs.readFileSync(filePath, "utf-8"));
 
-        return segments.map((segment, index) => ({
+        return segments.map((segment, index) => {
+            const timeKey = makeSubtitleTimeKey(segment.startMs, index);
+            const pagefindId = `subtitle:${normalizedPath}:${timeKey}`;
 
-            id: makeRecordId("subtitle", normalizedPath, String(segment.timeKey || index + 1).padStart(6, "0")),
-            sourceType: "subtitle",
-            text: segment.text
-        }));
-    });
+            return {
+                sourceType: "subtitle",
+                pagefindId,
+                textDataKey: pagefindId,
+                bucketKey: `subtitle:${normalizedPath}`,
+                titleText: "subtitle",
+                searchText: segment.text,
+                text: segment.text
+            };
+        });
+    }).filter((record) => record.text.trim());
 }
 
-function loadLanguageRecords(languageConfig) {
+function loadLanguageData(languageConfig, metaData) {
+    const { records: textMapRecords, textMap } = loadTextMapRecords(languageConfig, metaData);
     const records = [
-        ...loadTextMapRecords(languageConfig),
+        ...textMapRecords,
         ...loadReadableRecords(languageConfig),
         ...loadSubtitleRecords(languageConfig)
     ];
-
     const uniqueRecordsById = new Map();
 
     for (const record of records) {
         if (record.text.trim()) {
-            uniqueRecordsById.set(record.id, record);
+            uniqueRecordsById.set(record.pagefindId, record);
         }
     }
 
-    return Array.from(uniqueRecordsById.values())
-        .sort((left, right) => left.id.localeCompare(right.id));
+    return {
+        textMap,
+        records: Array.from(uniqueRecordsById.values())
+            .sort((left, right) => left.pagefindId.localeCompare(right.pagefindId))
+    };
 }
 
-function buildSearchEntries(languageRecords) {
-    return languageRecords
-        .map((record) => ({
-            hash: record.id,
-            searchText: String(record.text ?? "")
-        }))
-        .filter((entry) => entry.searchText.trim())
-        .sort((left, right) => left.hash.localeCompare(right.hash));
+function addToTextBucket(buckets, record) {
+    const bucketId = getBucketId(String(record.bucketKey));
+    buckets[Number(bucketId)][record.textDataKey] = record.text;
 }
 
-async function writeLanguageTextData(languageConfig, languageRecords) {
-    const entries = languageRecords
-        .map((record) => ({
-            hash: record.id,
-            text: String(record.text ?? "")
-        }))
-        .sort((left, right) => left.hash.localeCompare(right.hash));
-    const buckets = bucketEntries(entries);
-    const bucketStats = summarizeBucketStats(buckets, (entry) => entry.text);
-    const startedAt = Date.now();
+function writeLookupTables(languageConfig, metaData, textMap) {
+    const names = {};
+    for (const hash of metaData.nameHashes) {
+        if (textMap[hash]) {
+            names[hash] = textMap[hash];
+        }
+    }
+
+    const quests = {};
+    for (const hash of metaData.questTitleHashes) {
+        if (textMap[hash]) {
+            quests[hash] = textMap[hash];
+        }
+    }
+
+    const sourceTitles = {};
+    for (const hash of metaData.sourceTitleHashes) {
+        if (textMap[hash]) {
+            sourceTitles[hash] = textMap[hash];
+        }
+    }
 
     fs.mkdirSync(languageConfig.textDataOutputDir, { recursive: true });
+    fs.writeFileSync(
+        path.join(languageConfig.textDataOutputDir, "names.json"),
+        JSON.stringify(names),
+        "utf-8"
+    );
+    fs.writeFileSync(
+        path.join(languageConfig.textDataOutputDir, "quests.json"),
+        JSON.stringify(quests),
+        "utf-8"
+    );
+    fs.writeFileSync(
+        path.join(languageConfig.textDataOutputDir, "source-titles.json"),
+        JSON.stringify(sourceTitles),
+        "utf-8"
+    );
+}
 
+async function writeLanguageTextData(languageConfig, languageRecords, metaData) {
+    const buckets = Array.from({ length: BUCKET_COUNT }, () => ({}));
+    const redundantHashes = new Set();
+    let redundantWriteCount = 0;
+    const startedAt = Date.now();
+
+    for (const record of languageRecords) {
+        if (record.sourceType === "talk") {
+            const textHash = record.textDataKey;
+            const associatedTalkIds = metaData.hashToAllTalks.get(textHash);
+
+            if (associatedTalkIds && associatedTalkIds.size > 0) {
+                if (associatedTalkIds.size > 1) {
+                    redundantHashes.add(textHash);
+                    redundantWriteCount += associatedTalkIds.size - 1;
+                    console.log(
+                        `[redundant] textHash ${textHash} appears in ${associatedTalkIds.size} talks: `
+                        + `${Array.from(associatedTalkIds).join(", ")} -> writing to ${associatedTalkIds.size} buckets`
+                    );
+                }
+
+                for (const talkId of associatedTalkIds) {
+                    addToTextBucket(buckets, {
+                        ...record,
+                        bucketKey: String(talkId),
+                        textDataKey: textHash
+                    });
+                }
+                continue;
+            }
+        }
+
+        addToTextBucket(buckets, record);
+    }
+
+    const nonEmptyBuckets = buckets
+        .map((entriesByKey, bucketIndex) => ({
+            bucketId: String(bucketIndex).padStart(4, "0"),
+            entries: Object.entries(entriesByKey).map(([hash, text]) => ({ hash, text }))
+        }))
+        .filter((bucket) => bucket.entries.length > 0);
+    const bucketStats = summarizeBucketStats(nonEmptyBuckets, (entry) => entry.text);
+
+    fs.mkdirSync(languageConfig.textDataOutputDir, { recursive: true });
     await mapWithConcurrency(
-        buckets,
+        nonEmptyBuckets,
         INDEX_CONCURRENCY,
         async (bucket, bucketIndex) => {
-            const textMap = Object.fromEntries(bucket.entries.map((entry) => [entry.hash, entry.text]));
             const outputPath = path.join(languageConfig.textDataOutputDir, `${bucket.bucketId}.json`);
-
+            const textMap = Object.fromEntries(bucket.entries.map((entry) => [entry.hash, entry.text]));
             fs.writeFileSync(outputPath, JSON.stringify(textMap), "utf-8");
 
-            if ((bucketIndex + 1) % 100 === 0 || bucketIndex === buckets.length - 1) {
-                console.log(`[${languageConfig.id}] Wrote ${bucketIndex + 1} / ${buckets.length} text-data buckets...`);
+            if ((bucketIndex + 1) % 100 === 0 || bucketIndex === nonEmptyBuckets.length - 1) {
+                console.log(`[${languageConfig.id}] Wrote ${bucketIndex + 1} / ${nonEmptyBuckets.length} text-data buckets...`);
             }
         }
     );
@@ -542,6 +678,11 @@ async function writeLanguageTextData(languageConfig, languageRecords) {
         + `(buckets=${bucketStats.bucketCount}, entries min/median/p90/max: `
         + `${bucketStats.entriesPerBucket.min}/${bucketStats.entriesPerBucket.median}/${bucketStats.entriesPerBucket.p90}/${bucketStats.entriesPerBucket.max}, `
         + `chars min/median/p90/max: ${bucketStats.charsPerBucket.min}/${bucketStats.charsPerBucket.median}/${bucketStats.charsPerBucket.p90}/${bucketStats.charsPerBucket.max}).`
+    );
+    console.log(
+        `[${languageConfig.id}] Redundancy summary: `
+        + `${redundantHashes.size} unique hashes duplicated across multiple talks, `
+        + `${redundantWriteCount} extra writes (total).`
     );
 }
 
@@ -571,15 +712,12 @@ function writeTextDataManifest(languageConfigs) {
 
 async function buildLanguageIndex(languageConfig, languageRecords) {
     const buildStartedAt = Date.now();
-    const { index } = await pagefind.createIndex({
-        forceLanguage: "en"
-    });
-
-    const entries = buildSearchEntries(languageRecords);
-    const buckets = bucketEntries(entries);
+    const { index } = await pagefind.createIndex({ forceLanguage: "en" });
+    const searchableRecords = languageRecords.filter((record) => record.searchText.trim());
+    const buckets = bucketEntries(searchableRecords, (record) => record.pagefindId);
     const bucketStats = summarizeBucketStats(buckets);
 
-    console.log(`[${languageConfig.id}] Loaded ${entries.length} searchable records.`);
+    console.log(`[${languageConfig.id}] Loaded ${searchableRecords.length} searchable records.`);
     console.log(
         `[${languageConfig.id}] Building ${bucketStats.bucketCount} pure HTML index buckets with BUCKET_COUNT=${BUCKET_COUNT} `
         + `(entries min/median/p90/max: ${bucketStats.entriesPerBucket.min}/${bucketStats.entriesPerBucket.median}/${bucketStats.entriesPerBucket.p90}/${bucketStats.entriesPerBucket.max}, `
@@ -626,7 +764,6 @@ async function buildLanguageIndex(languageConfig, languageRecords) {
 
     await index.writeFiles({ outputPath: languageConfig.pagefindOutputDir });
     await index.deleteIndex();
-
     fs.rmSync(languageConfig.tempIndexOutputDir, { force: true, recursive: true });
 
     console.log(`[${languageConfig.id}] Pagefind index built in ${Date.now() - buildStartedAt}ms total.`);
@@ -644,17 +781,23 @@ async function buildAllIndexes() {
         );
     }
 
+    console.log("Building meta-data...");
+    const metaData = buildMetaData(DATA_PATH);
+
     console.log("Reading text sources...");
-    const languageRecordsById = Object.fromEntries(
-        languageConfigs.map((config) => [config.id, loadLanguageRecords(config)])
+    const languageDataById = Object.fromEntries(
+        languageConfigs.map((config) => [config.id, loadLanguageData(config, metaData)])
     );
 
     resetOutputDirs();
+    writeMetaBuckets(metaData, META_DATA_OUTPUT_ROOT);
     writeTextDataManifest(languageConfigs);
 
     for (const languageConfig of languageConfigs) {
-        await writeLanguageTextData(languageConfig, languageRecordsById[languageConfig.id]);
-        await buildLanguageIndex(languageConfig, languageRecordsById[languageConfig.id]);
+        const languageData = languageDataById[languageConfig.id];
+        writeLookupTables(languageConfig, metaData, languageData.textMap);
+        await writeLanguageTextData(languageConfig, languageData.records, metaData);
+        await buildLanguageIndex(languageConfig, languageData.records);
     }
 
     fs.rmSync(TEMP_INDEX_OUTPUT_ROOT, { force: true, recursive: true });

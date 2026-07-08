@@ -1,4 +1,5 @@
 import * as pagefind from "./pagefind/chs/pagefind.js";
+import { MyDomElement, parse as parseRichText } from "./textStyleParse.js";
 
 const BUCKET_COUNT = 512;
 
@@ -17,6 +18,7 @@ const SOURCE_TYPE_LABELS = {
     readable: "阅读物",
     subtitle: "字幕",
     textmap: "其他文本",
+    fetter: "角色语音",
     unknown: "未知来源"
 };
 
@@ -35,15 +37,24 @@ const drawerContent = document.getElementById("drawer-content");
 let searchToken = 0;
 let activeLanguage = languageSelect.value;
 let initializedLanguage = null;
+
 const textBucketCache = new Map();
+const metaBucketCache = new Map();
 const renderedItems = new Map();
+const namesCache = {};
+const questsCache = {};
+const sourceTitlesCache = {};
 
 function getLanguageBasePath(language) {
     return new URL(`./pagefind/${language}/`, window.location.href).pathname;
 }
 
+function getTextDataUrl(language, fileName) {
+    return new URL(`./text-data/${language}/${fileName}`, window.location.href).href;
+}
+
 function getTextBucketUrl(language, bucketId) {
-    return new URL(`./text-data/${language}/${bucketId}.json`, window.location.href).href;
+    return getTextDataUrl(language, `${bucketId}.json`);
 }
 
 function getDisplayLanguages(searchLanguage) {
@@ -60,9 +71,10 @@ function getSourceTypeLabel(sourceType) {
 
 function getBucketId(hash) {
     let mixedHash = 0x811c9dc5;
+    const strHash = String(hash ?? "");
 
-    for (let index = 0; index < hash.length; index += 1) {
-        mixedHash ^= hash.charCodeAt(index);
+    for (let index = 0; index < strHash.length; index += 1) {
+        mixedHash ^= strHash.charCodeAt(index);
         mixedHash = Math.imul(mixedHash, 0x01000193);
     }
 
@@ -103,12 +115,10 @@ function preprocessForCharacterSearch(inputValue) {
             if (output && output[output.length - 1] !== " ") {
                 output += " ";
             }
-
             continue;
         }
 
         output += char;
-
         const nextChar = normalized[index + 1] ?? "";
         const needsSeparator = (
             (isHan(char) && isHan(nextChar))
@@ -153,7 +163,6 @@ function preprocessExactQuery(inputValue) {
 
 function wrapExactQuery(value) {
     const normalized = preprocessExactQuery(value).replace(/^"+|"+$/g, "");
-
     if (!normalized) {
         return "";
     }
@@ -178,7 +187,6 @@ function compactTextForMatch(value) {
 
 function buildMatchInfo(item, rawKeyword, language) {
     const compactQuery = compactTextForMatch(rawKeyword);
-
     if (!compactQuery) {
         return null;
     }
@@ -193,7 +201,7 @@ function buildMatchInfo(item, rawKeyword, language) {
         candidates.push(item.texts[language]);
     }
 
-    let bestIndex = Infinity;
+    let bestIndex = Number.POSITIVE_INFINITY;
     let bestField = "";
 
     for (const candidate of candidates) {
@@ -206,7 +214,7 @@ function buildMatchInfo(item, rawKeyword, language) {
         }
     }
 
-    if (bestIndex === Infinity) {
+    if (!Number.isFinite(bestIndex)) {
         return null;
     }
 
@@ -223,7 +231,6 @@ async function loadTextBucket(language, bucketId) {
     if (!textBucketCache.has(cacheKey)) {
         textBucketCache.set(cacheKey, (async () => {
             const response = await fetch(getTextBucketUrl(language, bucketId));
-
             if (!response.ok) {
                 throw new Error(`Failed to load text bucket: ${language}/${bucketId}`);
             }
@@ -235,64 +242,96 @@ async function loadTextBucket(language, bucketId) {
     return textBucketCache.get(cacheKey);
 }
 
-async function hydrateOriginalTexts(items, language) {
-    const displayLanguages = getDisplayLanguages(language);
-
-    return Promise.all(items.map(async (item) => {
-        if (item.kind !== "hash" || !item.hash) {
-            return item;
-        }
-
-        const bucketId = getBucketId(item.hash);
-        const textEntries = await Promise.all(displayLanguages.map(async (displayLanguage) => {
-            try {
-                const bucket = await loadTextBucket(displayLanguage, bucketId);
-                return [displayLanguage, String(bucket[item.hash] ?? "")];
-            } catch (error) {
-                console.warn(error);
-                return [displayLanguage, ""];
+function loadLookupTable(language, fileName, cache) {
+    if (!cache[language]) {
+        cache[language] = (async () => {
+            const response = await fetch(getTextDataUrl(language, fileName));
+            if (!response.ok) {
+                return {};
             }
-        }));
-        const texts = Object.fromEntries(textEntries);
+            return response.json();
+        })().catch((error) => {
+            console.warn(error);
+            return {};
+        });
+    }
 
-        return {
-            ...item,
-            displayLanguages,
-            texts,
-            searchLanguageText: texts[language] || ""
-        };
-    }));
+    return cache[language];
 }
 
-function extractRecordIdFromResult(subResult) {
-    const fromTitle = String(subResult.title || "").trim();
+function loadNames(language) {
+    return loadLookupTable(language, "names.json", namesCache);
+}
 
-    if (fromTitle) {
-        return fromTitle;
+function loadQuests(language) {
+    return loadLookupTable(language, "quests.json", questsCache);
+}
+
+function loadSourceTitles(language) {
+    return loadLookupTable(language, "source-titles.json", sourceTitlesCache);
+}
+
+async function loadMetaBucket(bucketType, bucketId) {
+    const cacheKey = `${bucketType}:${bucketId}`;
+
+    if (!metaBucketCache.has(cacheKey)) {
+        metaBucketCache.set(cacheKey, (async () => {
+            const url = new URL(`./meta-data/${bucketType}/${bucketId}.json`, window.location.href).href;
+            const response = await fetch(url);
+            if (!response.ok) {
+                return {};
+            }
+
+            return response.json();
+        })());
     }
 
-    const fromUrl = subResult.url?.match(/#hash-(.+)$/)?.[1];
-
-    if (fromUrl) {
-        try {
-            return decodeURIComponent(fromUrl);
-        } catch {
-            return fromUrl;
-        }
-    }
-
-    return "unknown";
+    return metaBucketCache.get(cacheKey);
 }
 
 function parseRecordId(recordId) {
     const id = String(recordId || "unknown");
 
+    if (id.startsWith("talk:")) {
+        const [, talkId, textHash] = id.split(":");
+        return {
+            sourceType: "talk",
+            sourceId: talkId,
+            textDataKey: textHash,
+            bucketKey: talkId,
+            originDetail: `talkId: ${talkId}`
+        };
+    }
+
+    if (id.startsWith("fetter:")) {
+        const textHash = id.slice("fetter:".length);
+        return {
+            sourceType: "fetter",
+            sourceId: textHash,
+            textDataKey: textHash,
+            bucketKey: `fetter:${textHash}`,
+            originDetail: textHash
+        };
+    }
+
+    if (id.startsWith("textmap:")) {
+        const textHash = id.slice("textmap:".length);
+        return {
+            sourceType: "textmap",
+            sourceId: textHash,
+            textDataKey: textHash,
+            bucketKey: `textmap:${textHash}`,
+            originDetail: textHash
+        };
+    }
+
     if (id.startsWith("readable:")) {
         const sourceId = id.slice("readable:".length);
-
         return {
             sourceType: "readable",
             sourceId,
+            textDataKey: id,
+            bucketKey: id,
             originDetail: sourceId
         };
     }
@@ -307,77 +346,138 @@ function parseRecordId(recordId) {
             sourceType: "subtitle",
             sourceId,
             segment,
+            textDataKey: id,
+            bucketKey: `subtitle:${sourceId}`,
             originDetail: segment ? `${sourceId} #${segment}` : sourceId
-        };
-    }
-
-    if (id.startsWith("textmap:")) {
-        const sourceId = id.slice("textmap:".length);
-
-        return {
-            sourceType: "textmap",
-            sourceId,
-            originDetail: sourceId
         };
     }
 
     return {
         sourceType: "textmap",
         sourceId: id,
+        textDataKey: id,
+        bucketKey: `textmap:${id}`,
         originDetail: id
     };
 }
 
-function buildResultSourceMeta(item) {
-    const hash = String(item.hash || item.title || "unknown");
-    const sourceMeta = parseRecordId(hash);
+function getTextBucketIdFromRecordId(recordId) {
+    return getBucketId(parseRecordId(recordId).bucketKey);
+}
+
+function getTextDataKeyFromRecordId(recordId) {
+    return parseRecordId(recordId).textDataKey;
+}
+
+function extractRecordIdFromResult(subResult) {
+    const fromUrl = subResult.url?.match(/#hash-(.+)$/)?.[1];
+    if (fromUrl) {
+        try {
+            return decodeURIComponent(fromUrl);
+        } catch {
+            return fromUrl;
+        }
+    }
+
+    const fromTitle = String(subResult.title || "").trim();
+    if (fromTitle) {
+        return fromTitle;
+    }
+
+    return "unknown";
+}
+
+async function hydrateOriginalTexts(items, language) {
+    return Promise.all(items.map(async (item) => {
+        if (item.kind !== "hash" || !item.hash) {
+            return item;
+        }
+
+        const parsed = parseRecordId(item.hash);
+        const bucketId = getBucketId(parsed.bucketKey);
+        const lookupKey = parsed.textDataKey;
+        const displayLanguages = parsed.sourceType === "subtitle"
+            ? [language]
+            : getDisplayLanguages(language);
+
+        const textEntries = await Promise.all(displayLanguages.map(async (displayLanguage) => {
+            try {
+                const bucket = await loadTextBucket(displayLanguage, bucketId);
+                return [displayLanguage, String(bucket[lookupKey] ?? "")];
+            } catch (error) {
+                console.warn(error);
+                return [displayLanguage, ""];
+            }
+        }));
+
+        const texts = Object.fromEntries(textEntries);
+        return {
+            ...item,
+            displayLanguages,
+            texts,
+            searchLanguageText: texts[language] || ""
+        };
+    }));
+}
+
+function buildResultSourceMeta(item, keyword = "") {
+    const recordId = String(item.hash || "unknown");
+    const sourceMeta = parseRecordId(recordId);
 
     return {
         sourceType: sourceMeta.sourceType,
-        origin: `${getSourceTypeLabel(sourceMeta.sourceType)}: ${sourceMeta.originDetail}`,
+        origin: `${getSourceTypeLabel(sourceMeta.sourceType)}`,
         canOpenContext: true,
-        contextKey: hash,
+        contextKey: recordId,
         contextParams: {
-            hash,
-            recordId: hash,
+            recordId,
             sourceId: sourceMeta.sourceId,
             segment: sourceMeta.segment || "",
             sourceType: sourceMeta.sourceType,
+            textDataKey: sourceMeta.textDataKey,
+            bucketKey: sourceMeta.bucketKey,
             pagefindUrl: item.url || "",
-            searchLanguage: item.searchLanguage || activeLanguage
+            searchLanguage: item.searchLanguage || activeLanguage,
+            keyword
         }
     };
 }
 
-function flattenResults(searchResults, loadedDocuments, language) {
+function flattenResults(searchResults, loadedDocuments, language, keyword) {
     const flattened = [];
 
     loadedDocuments.forEach((document, index) => {
         const searchResult = searchResults[index];
         const subResults = Array.isArray(document.sub_results) ? document.sub_results : [];
 
-        if (subResults.length) {
-            subResults.forEach((subResult) => {
-                const hash = extractRecordIdFromResult(subResult);
-                const baseItem = {
-                    kind: "hash",
-                    title: subResult.title || hash,
-                    hash,
-                    url: subResult.url,
-                    excerpt: subResult.excerpt || document.excerpt || "",
-                    score: searchResult.score,
-                    texts: {},
-                    displayLanguages: getDisplayLanguages(language),
-                    searchLanguageText: "",
-                    searchLanguage: language
-                };
-
-                flattened.push({
-                    ...baseItem,
-                    ...buildResultSourceMeta(baseItem)
-                });
-            });
+        if (!subResults.length) {
+            return;
         }
+
+        subResults.forEach((subResult) => {
+            const hash = extractRecordIdFromResult(subResult);
+            const parsed = parseRecordId(hash);
+            const displayLanguages = parsed.sourceType === "subtitle"
+                ? [language]
+                : getDisplayLanguages(language);
+            const baseItem = {
+                kind: "hash",
+                title: subResult.title || hash,
+                hash,
+                url: subResult.url,
+                excerpt: subResult.excerpt || document.excerpt || "",
+                score: searchResult.score,
+                texts: {},
+                displayLanguages,
+                searchLanguageText: "",
+                searchLanguage: language
+            };
+
+            flattened.push({
+                ...baseItem,
+                ...buildResultSourceMeta(baseItem, keyword)
+            });
+        });
     });
 
     return flattened;
@@ -387,7 +487,6 @@ function filterAndSortResults(items, rawKeyword, language) {
     return items
         .map((item) => {
             const match = buildMatchInfo(item, rawKeyword, language);
-
             if (!match) {
                 return null;
             }
@@ -462,20 +561,383 @@ ${textBlocks}
     }).join("");
 }
 
-async function loadResultContext(item) {
-    return {
-        status: "empty",
-        title: item.origin || getSourceTypeLabel(item.sourceType),
-        subtitle: `id: ${item.contextParams?.recordId || item.hash || "-"} · source: ${getSourceTypeLabel(item.sourceType)}`,
-        message: "详细上下文接口尚未接入。后续可在 loadResultContext(item) 中根据 contextKey/contextParams 拉取对话、阅读物或字幕上下文。",
-        rows: [
-            {
-                speaker: "角色",
-                chs: "这里将显示简体中文上下文，并对命中词预留高亮。",
-                en: "English context will appear here with highlighted hits."
+function _createStyledSpan(node) {
+    const span = document.createElement("span");
+    if (node.tagName === "color") {
+        if (!String(node.tagValue || "").toLowerCase().startsWith("#ffffff")) {
+            span.style.color = node.tagValue;
+        }
+    } else if (node.tagName === "i") {
+        span.style.fontStyle = "italic";
+    }
+
+    return span;
+}
+
+function _appendTextWithHighlight(container, text, lowerKeyword) {
+    if (!lowerKeyword || !text) {
+        container.appendChild(document.createTextNode(text));
+        return;
+    }
+
+    const lowerText = text.toLowerCase();
+    let position = 0;
+
+    while (position < text.length) {
+        const matchIndex = lowerText.indexOf(lowerKeyword, position);
+        if (matchIndex === -1) {
+            container.appendChild(document.createTextNode(text.substring(position)));
+            break;
+        }
+
+        if (matchIndex > position) {
+            container.appendChild(document.createTextNode(text.substring(position, matchIndex)));
+        }
+
+        const mark = document.createElement("mark");
+        mark.className = "keyword-highlight";
+        mark.textContent = text.substring(matchIndex, matchIndex + lowerKeyword.length);
+        container.appendChild(mark);
+        position = matchIndex + lowerKeyword.length;
+    }
+}
+
+function _iterateRichNode(node, lineElements, containerStack, labelStack, lowerKeyword) {
+    let container = containerStack[containerStack.length - 1];
+    if (node.tagName !== "root") {
+        labelStack.push(node);
+    }
+
+    for (const child of node.children) {
+        if (typeof child === "string") {
+            const lines = child.split("\n");
+            for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+                if (lineIndex > 0) {
+                    const newParagraph = document.createElement("p");
+                    lineElements.push(newParagraph);
+                    containerStack[0] = newParagraph;
+                    let stackIndex = 1;
+
+                    for (const label of labelStack) {
+                        const span = _createStyledSpan(label);
+                        (stackIndex === 1 ? newParagraph : containerStack[stackIndex - 1]).appendChild(span);
+                        containerStack[stackIndex] = span;
+                        container = span;
+                        stackIndex += 1;
+                    }
+                }
+
+                _appendTextWithHighlight(container, lines[lineIndex], lowerKeyword);
             }
-        ]
+        } else {
+            const span = _createStyledSpan(child);
+            containerStack.push(span);
+            container.appendChild(span);
+            _iterateRichNode(child, lineElements, containerStack, labelStack, lowerKeyword);
+        }
+    }
+
+    labelStack.pop();
+    containerStack.pop();
+}
+
+function buildPlainTextFragment(text, lowerKeyword) {
+    const fragment = document.createDocumentFragment();
+    const lines = String(text ?? "").split("\n");
+
+    for (const line of lines) {
+        const paragraph = document.createElement("p");
+        _appendTextWithHighlight(paragraph, line, lowerKeyword);
+        fragment.appendChild(paragraph);
+    }
+
+    return fragment;
+}
+
+function stylizeText(text, keyword) {
+    if (!text) {
+        return document.createDocumentFragment();
+    }
+
+    const lowerKeyword = keyword ? keyword.toLowerCase() : "";
+
+    try {
+        const root = new MyDomElement();
+        root.children = parseRichText(text);
+        root.tagName = "root";
+
+        const fragment = document.createDocumentFragment();
+        const firstParagraph = document.createElement("p");
+        const lineElements = [firstParagraph];
+        const containerStack = [firstParagraph];
+        const labelStack = [];
+
+        _iterateRichNode(root, lineElements, containerStack, labelStack, lowerKeyword);
+
+        for (const element of lineElements) {
+            fragment.appendChild(element);
+        }
+
+        return fragment;
+    } catch (error) {
+        console.warn("Failed to parse rich text.", error);
+        return buildPlainTextFragment(text, lowerKeyword);
+    }
+}
+
+async function loadTextBucketsForLanguages(displayLangs, bucketId) {
+    const entries = await Promise.all(displayLangs.map(async (language) => {
+        try {
+            return [language, await loadTextBucket(language, bucketId)];
+        } catch (error) {
+            console.warn(error);
+            return [language, {}];
+        }
+    }));
+
+    return Object.fromEntries(entries);
+}
+
+function buildQuestTitle(questHashes, questsMap) {
+    if (!questHashes) {
+        return "对话文本";
+    }
+
+    const questTitle = questsMap[questHashes.questTitleHash] || null;
+    if (!questTitle) {
+        return "对话文本";
+    }
+
+    const chapterTitle = questHashes.chapterTitleHash ? questsMap[questHashes.chapterTitleHash] : null;
+    const chapterNum = questHashes.chapterNumHash ? questsMap[questHashes.chapterNumHash] : null;
+
+    if (!chapterTitle) {
+        return questTitle;
+    }
+    if (chapterNum) {
+        return `${chapterNum} · ${chapterTitle} · ${questTitle}`;
+    }
+
+    return `${chapterTitle} · ${questTitle}`;
+}
+
+function getUserCustomName(key) {
+    try {
+        return window.localStorage.getItem(`gi-text-search-custom-name:${key}`) || null;
+    } catch {
+        return null;
+    }
+}
+
+function resolveSpeakerName(nameHash, namesMap) {
+    if (nameHash === "PLAYER") {
+        return getUserCustomName("player") || "主角";
+    }
+    if (nameHash === "MATE_AVATAR") {
+        return getUserCustomName("mate") || "反主";
+    }
+    if (nameHash === null || nameHash === undefined) {
+        return "";
+    }
+
+    const name = namesMap[nameHash];
+    if (!name) {
+        return "";
+    }
+
+    if (name.includes("#{REALNAME[ID(1)")) {
+        return getUserCustomName("wanderer") || "流浪者";
+    }
+
+    return name;
+}
+
+function parseSubtitleStartMs(timeKey) {
+    const startPart = String(timeKey || "").split("-")[0];
+    return Number(startPart) || 0;
+}
+
+async function loadTalkContext(recordId, displayLangs, keyword) {
+    const [, talkId, hitHash] = String(recordId).split(":");
+    const talkBucketId = getBucketId(talkId);
+    const [talkDetailsBucket, primaryNames, primaryQuests, textBucketsByLang] = await Promise.all([
+        loadMetaBucket("talk-details", talkBucketId),
+        loadNames(displayLangs[0]),
+        loadQuests(displayLangs[0]),
+        loadTextBucketsForLanguages(displayLangs, talkBucketId)
+    ]);
+
+    const talkData = talkDetailsBucket[talkId];
+    if (!talkData) {
+        return {
+            status: "empty",
+            title: "对话文本",
+            subtitle: "",
+            message: "未找到对话数据。",
+            rows: []
+        };
+    }
+
+    const title = buildQuestTitle(talkData.questHashes, primaryQuests);
+    const rows = talkData.dialogues.map((dialogue) => ({
+        hash: dialogue.hash,
+        isHit: dialogue.hash === hitHash,
+        speaker: resolveSpeakerName(dialogue.nameHash, primaryNames),
+        cells: Object.fromEntries(displayLangs.map((language) => [
+            language,
+            textBucketsByLang[language]?.[dialogue.hash] || ""
+        ]))
+    }));
+
+    return {
+        status: "ok",
+        title,
+        subtitle: `talkId: ${talkId}`,
+        rows,
+        hitHash,
+        keyword
     };
+}
+
+async function loadSubtitleContext(recordId, displayLangs, keyword) {
+    const parsed = parseRecordId(recordId);
+    const filePath = parsed.sourceId;
+    const hitSegment = parsed.segment;
+    const hitStartMs = parseSubtitleStartMs(hitSegment);
+    const bucketId = getBucketId(parsed.bucketKey);
+    const textBucketsByLang = await loadTextBucketsForLanguages(displayLangs, bucketId);
+    const prefix = `subtitle:${filePath}:`;
+    const segments = [];
+
+    for (const language of displayLangs) {
+        const bucket = textBucketsByLang[language] || {};
+        for (const [key, text] of Object.entries(bucket)) {
+            if (!key.startsWith(prefix)) {
+                continue;
+            }
+
+            const timeKey = key.slice(prefix.length);
+            segments.push({
+                lang: language,
+                key,
+                text,
+                timeKey,
+                startMs: parseSubtitleStartMs(timeKey)
+            });
+        }
+    }
+
+    const thresholdMs = 500;
+    segments.sort((left, right) => left.startMs - right.startMs || left.lang.localeCompare(right.lang));
+
+    const rows = [];
+    for (const segment of segments) {
+        const lastRow = rows[rows.length - 1];
+        const canMerge = (
+            lastRow
+            && Math.abs(lastRow.startMs - segment.startMs) < thresholdMs
+            && !lastRow.cells[segment.lang]
+        );
+
+        if (canMerge) {
+            lastRow.cells[segment.lang] = segment.text;
+            lastRow.keys[segment.lang] = segment.key;
+            lastRow.isHit ||= Math.abs(segment.startMs - hitStartMs) < thresholdMs;
+            continue;
+        }
+
+        rows.push({
+            hash: segment.key,
+            keys: { [segment.lang]: segment.key },
+            startMs: segment.startMs,
+            isHit: Math.abs(segment.startMs - hitStartMs) < thresholdMs,
+            speaker: "",
+            cells: { [segment.lang]: segment.text }
+        });
+    }
+
+    return {
+        status: "ok",
+        title: `字幕: ${filePath}`,
+        subtitle: "",
+        rows,
+        hitHash: `${prefix}${hitSegment}`,
+        keyword
+    };
+}
+
+async function loadSingleHashContext(recordId, displayLangs, keyword) {
+    const parsed = parseRecordId(recordId);
+    const bucketId = getTextBucketIdFromRecordId(recordId);
+    const lookupKey = getTextDataKeyFromRecordId(recordId);
+    const textBucketsByLang = await loadTextBucketsForLanguages(displayLangs, bucketId);
+    const row = {
+        hash: parsed.textDataKey,
+        isHit: true,
+        speaker: "",
+        cells: {}
+    };
+
+    for (const language of displayLangs) {
+        row.cells[language] = textBucketsByLang[language]?.[lookupKey] || "";
+    }
+
+    return {
+        status: "ok",
+        title: getSourceTypeLabel(parsed.sourceType),
+        subtitle: parsed.originDetail,
+        rows: [row],
+        hitHash: parsed.textDataKey,
+        keyword
+    };
+}
+
+async function loadReadableContext(recordId, displayLangs, keyword) {
+    return loadSingleHashContext(recordId, displayLangs, keyword);
+}
+
+async function loadFetterContext(recordId, displayLangs, keyword) {
+    const parsed = parseRecordId(recordId);
+    const textHash = parsed.textDataKey;
+    const primaryLanguage = displayLangs[0];
+    const [metaBucket, names, sourceTitles, single] = await Promise.all([
+        loadMetaBucket("hash-to-fetter", getBucketId(textHash)),
+        loadNames(primaryLanguage),
+        loadSourceTitles(primaryLanguage),
+        loadSingleHashContext(recordId, displayLangs, keyword)
+    ]);
+    const fetter = metaBucket[textHash] || {};
+    const avatarName = fetter.avatarNameHash ? names[fetter.avatarNameHash] : "";
+    const voiceTitle = fetter.voiceTitleHash ? sourceTitles[fetter.voiceTitleHash] : "";
+
+    return {
+        ...single,
+        title: [avatarName, voiceTitle].filter(Boolean).join(" · ") || "角色语音",
+        subtitle: `textHash: ${textHash}`
+    };
+}
+
+async function loadResultContext(item) {
+    const recordId = item.contextParams?.recordId || item.hash;
+    const parsed = parseRecordId(recordId);
+    const searchLang = item.contextParams?.searchLanguage || activeLanguage;
+    const keyword = item.contextParams?.keyword || "";
+    const displayLangs = getDisplayLanguages(searchLang);
+
+    if (parsed.sourceType === "talk") {
+        return loadTalkContext(recordId, displayLangs, keyword);
+    }
+    if (parsed.sourceType === "subtitle") {
+        return loadSubtitleContext(recordId, displayLangs, keyword);
+    }
+    if (parsed.sourceType === "readable") {
+        return loadReadableContext(recordId, displayLangs, keyword);
+    }
+    if (parsed.sourceType === "fetter") {
+        return loadFetterContext(recordId, displayLangs, keyword);
+    }
+
+    return loadSingleHashContext(recordId, displayLangs, keyword);
 }
 
 function renderContextDrawer(state) {
@@ -487,26 +949,64 @@ function renderContextDrawer(state) {
         return;
     }
 
-    const rows = Array.isArray(state.rows) ? state.rows : [];
-    const skeletonRows = rows.map((row) => `
-        <div class="context-row">
-            <div class="context-cell">${escapeHtml(row.speaker || "-")}</div>
-            <div class="context-cell">${escapeHtml(row.chs || "待接入")}</div>
-            <div class="context-cell">${escapeHtml(row.en || "Pending")}</div>
-        </div>
-    `).join("");
+    if (!state.rows || state.rows.length === 0) {
+        drawerContent.innerHTML = `<div class="context-empty">${escapeHtml(state.message || "无上下文数据。")}</div>`;
+        return;
+    }
 
-    drawerContent.innerHTML = `
-        <div class="context-empty">${escapeHtml(state.message || "详细上下文待接入。")}</div>
-        <div class="context-skeleton" aria-label="上下文表格占位">
-            <div class="context-row is-header">
-                <div class="context-cell">角色</div>
-                <div class="context-cell">简体中文</div>
-                <div class="context-cell">English</div>
-            </div>
-            ${skeletonRows}
-        </div>
-    `;
+    const displayLangs = state.rows[0]?.cells ? Object.keys(state.rows[0].cells) : [];
+    if (!displayLangs.length) {
+        drawerContent.innerHTML = `<div class="context-empty">${escapeHtml(state.message || "无上下文数据。")}</div>`;
+        return;
+    }
+
+    const keyword = state.keyword || "";
+    const table = document.createElement("div");
+    table.className = "context-table";
+    table.style.setProperty("--context-lang-count", String(displayLangs.length));
+
+    const headerRow = document.createElement("div");
+    headerRow.className = "context-row is-header";
+    headerRow.innerHTML = [
+        '<div class="context-cell context-cell-speaker">角色</div>',
+        ...displayLangs.map((language) => `<div class="context-cell">${escapeHtml(getLanguageLabel(language))}</div>`)
+    ].join("");
+    table.appendChild(headerRow);
+
+    let hitRowAssigned = false;
+    for (const row of state.rows) {
+        const rowEl = document.createElement("div");
+        rowEl.className = `context-row${row.isHit ? " context-hit" : ""}`;
+
+        if (row.isHit && !hitRowAssigned) {
+            rowEl.id = "context-hit-row";
+            hitRowAssigned = true;
+        }
+
+        const speakerCell = document.createElement("div");
+        speakerCell.className = "context-cell context-cell-speaker";
+        speakerCell.textContent = row.speaker || "";
+        rowEl.appendChild(speakerCell);
+
+        for (const language of displayLangs) {
+            const cell = document.createElement("div");
+            cell.className = "context-cell";
+            cell.appendChild(stylizeText(row.cells[language] || "", keyword));
+            rowEl.appendChild(cell);
+        }
+
+        table.appendChild(rowEl);
+    }
+
+    drawerContent.innerHTML = "";
+    drawerContent.appendChild(table);
+
+    const hitRow = drawerContent.querySelector("#context-hit-row");
+    if (hitRow) {
+        requestAnimationFrame(() => {
+            hitRow.scrollIntoView({ behavior: "smooth", block: "center" });
+        });
+    }
 }
 
 async function openContextDrawer(item) {
@@ -520,8 +1020,19 @@ async function openContextDrawer(item) {
         subtitle: `id: ${item.hash || "-"}`
     });
 
-    const contextState = await loadResultContext(item);
-    renderContextDrawer(contextState);
+    try {
+        const contextState = await loadResultContext(item);
+        renderContextDrawer(contextState);
+    } catch (error) {
+        console.error(error);
+        renderContextDrawer({
+            status: "empty",
+            title: item.origin || "详细上下文",
+            subtitle: `id: ${item.hash || "-"}`,
+            message: "上下文加载失败，请在控制台查看详细错误。"
+        });
+    }
+
     drawerClose.focus();
 }
 
@@ -576,9 +1087,8 @@ async function runSearch(term, language) {
             return;
         }
 
-        const allResults = search.results;
-        const documents = await Promise.all(allResults.map((result) => result.data()));
-        const items = flattenResults(allResults, documents, language);
+        const documents = await Promise.all(search.results.map((result) => result.data()));
+        const items = flattenResults(search.results, documents, language, keyword);
         const hydratedItems = await hydrateOriginalTexts(items, language);
         const filteredItems = filterAndSortResults(hydratedItems, keyword, language);
 
@@ -626,13 +1136,11 @@ languageSelect.addEventListener("change", async () => {
 
 results.addEventListener("click", (event) => {
     const button = event.target.closest(".origin-action[data-result-id]");
-
     if (!button || button.disabled) {
         return;
     }
 
     const item = renderedItems.get(button.dataset.resultId);
-
     if (item) {
         openContextDrawer(item);
     }

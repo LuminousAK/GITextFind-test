@@ -10,8 +10,10 @@
             --panel: rgba(255, 252, 247, 0.94);
             --line: rgba(62, 45, 31, 0.16);
             --text: #2f241b;
+            --text-secondary: #746253;
             --muted: #746253;
             --accent: #b44d1e;
+            --accent-rgb: 180, 77, 30;
             --accent-soft: rgba(180, 77, 30, 0.12);
             --shadow: 0 24px 60px rgba(77, 51, 31, 0.16);
         }
@@ -44,9 +46,9 @@
 
         h1 {
             margin: 0 0 10px;
-            font-size: clamp(2rem, 4vw, 3.4rem);
-            line-height: 1;
-            letter-spacing: -0.04em;
+            font-size: 2.8rem;
+            line-height: 1.05;
+            letter-spacing: 0;
         }
 
         .lead {
@@ -310,17 +312,17 @@
             line-height: 1.7;
         }
 
-        .context-skeleton {
-            margin-top: 16px;
+        .context-table {
             border: 1px solid var(--line);
             border-radius: 16px;
-            overflow: hidden;
+            overflow: auto;
             background: rgba(255, 255, 255, 0.72);
         }
 
         .context-row {
             display: grid;
-            grid-template-columns: 96px minmax(0, 1fr) minmax(0, 1fr);
+            grid-template-columns: 96px repeat(var(--context-lang-count, 2), minmax(0, 1fr));
+            min-width: calc(96px + var(--context-lang-count, 2) * 220px);
             gap: 1px;
             background: var(--line);
         }
@@ -329,12 +331,19 @@
             border-top: 1px solid var(--line);
         }
 
+        .context-row.is-header {
+            font-weight: 600;
+            background: var(--line);
+        }
+
         .context-cell {
             min-width: 0;
-            padding: 12px;
-            background: #fffaf4;
-            color: var(--muted);
-            line-height: 1.55;
+            padding: 8px 12px;
+            background: var(--bg);
+            color: var(--text);
+            word-break: normal;
+            overflow-wrap: break-word;
+            line-height: 1.6;
         }
 
         .context-row.is-header .context-cell {
@@ -344,15 +353,38 @@
             background: rgba(180, 77, 30, 0.08);
         }
 
-        .context-hit {
-            color: var(--text);
-            background: var(--accent-soft);
+        .context-cell-speaker {
+            font-weight: 500;
+            color: var(--text-secondary);
+        }
+
+        .context-row.context-hit .context-cell {
+            background: rgba(var(--accent-rgb), 0.08);
+        }
+
+        .keyword-highlight {
+            background: rgba(255, 213, 79, 0.45);
+            color: inherit;
+            border-radius: 2px;
+            padding: 0 1px;
+        }
+
+        .context-cell p {
+            margin: 0;
+        }
+
+        .context-cell p + p {
+            margin-top: 4px;
         }
 
         @media (max-width: 700px) {
             .shell {
                 margin: 18px auto;
                 padding: 20px;
+            }
+
+            h1 {
+                font-size: 2.2rem;
             }
 
             .searchbar {
@@ -376,15 +408,6 @@
 
             .drawer-backdrop.is-open .context-drawer {
                 transform: translateY(0);
-            }
-
-            .context-row {
-                grid-template-columns: 82px minmax(0, 1fr);
-            }
-
-            .context-row .context-cell:nth-child(3) {
-                grid-column: 2;
-                border-top: 1px solid var(--line);
             }
         }
     </style>
