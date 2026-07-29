@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
-export const DATA_PATH = process.env.GI_DATA_PATH || "E:\\animegamedata2-main";
+export const DATA_PATH = process.env.GI_DATA_PATH || "E:\\animegamedata2";
 export const OUTPUT_ROOT = path.resolve("./public/meta-data");
 export const BUCKET_COUNT = 512;
 

@@ -10,3 +10,5 @@ Readable/
 Subtitle/
 TextMap/
 GITextSearchStatic/
+build.log
+.env.pagefind.local
