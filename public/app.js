@@ -174,6 +174,14 @@ function setPlaceholder(message) {
     results.innerHTML = `<div class="placeholder">${message}</div>`;
 }
 
+function waitForNextPaint() {
+    return new Promise((resolve) => {
+        requestAnimationFrame(() => {
+            requestAnimationFrame(resolve);
+        });
+    });
+}
+
 function stripHtml(value) {
     return String(value ?? "").replace(/<[^>]+>/g, "");
 }
@@ -1081,9 +1089,17 @@ async function runSearch(term, language) {
             return;
         }
 
-        if (!search.results.length) {
-            status.textContent = `${getLanguageLabel(language)} 中没有找到 "${keyword}"。`;
+        const exactMatchCount = search.exactMatchCount;
+        status.textContent = `找到 ${exactMatchCount.toLocaleString("en-US")} 条`;
+
+        if (exactMatchCount === 0) {
             setPlaceholder("没有找到匹配结果。可以尝试更短或更常见的关键词。");
+            return;
+        }
+
+        await waitForNextPaint();
+
+        if (currentToken !== searchToken) {
             return;
         }
 
@@ -1097,12 +1113,10 @@ async function runSearch(term, language) {
         }
 
         if (!filteredItems.length) {
-            status.textContent = `${getLanguageLabel(language)} 中没有找到连续命中的 "${keyword}"。`;
             setPlaceholder("Pagefind 找到了粗略匹配，但没有结果通过前端连续命中过滤。");
             return;
         }
 
-        status.textContent = `在 ${getLanguageLabel(language)} 中找到 ${filteredItems.length} 条展示结果，来自 ${search.results.length} 个 Pagefind 分组命中。`;
         renderItems(filteredItems, language);
     } catch (error) {
         console.error(error);
