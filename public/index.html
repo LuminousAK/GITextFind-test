@@ -88,6 +88,11 @@
             cursor: pointer;
         }
 
+        button:disabled {
+            opacity: 0.48;
+            cursor: not-allowed;
+        }
+
         .status {
             min-height: 28px;
             margin-bottom: 10px;
@@ -116,6 +121,60 @@
         .results {
             display: grid;
             gap: 14px;
+        }
+
+        .pagination {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .pagination-top {
+            margin-bottom: 20px;
+            padding-bottom: 18px;
+            border-bottom: 1px solid var(--line);
+        }
+
+        .pagination-bottom {
+            margin-top: 20px;
+            padding-top: 18px;
+            border-top: 1px solid var(--line);
+        }
+
+        .pagination[hidden] {
+            display: none;
+        }
+
+        .pagination button {
+            min-height: 42px;
+            padding: 8px 14px;
+            border-radius: 12px;
+        }
+
+        .pagination-form {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .pagination-input {
+            width: 84px;
+            min-height: 42px;
+            padding: 8px 10px;
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            color: var(--text);
+            background: rgba(255, 255, 255, 0.78);
+            font: inherit;
+            text-align: center;
+            outline: none;
+        }
+
+        .pagination-total {
+            min-width: 64px;
+            color: var(--muted);
+            font-variant-numeric: tabular-nums;
         }
 
         .result {
@@ -216,6 +275,14 @@
             margin: 0;
             line-height: 1.7;
             white-space: pre-wrap;
+        }
+
+        .excerpt p {
+            margin: 0;
+        }
+
+        .excerpt p + p {
+            margin-top: 6px;
         }
 
         .placeholder {
@@ -391,6 +458,20 @@
                 grid-template-columns: 1fr;
             }
 
+            .pagination {
+                flex-wrap: wrap;
+            }
+
+            .pagination button {
+                flex: 1 1 auto;
+            }
+
+            .pagination-form {
+                order: 3;
+                width: 100%;
+                justify-content: center;
+            }
+
             .drawer-backdrop {
                 align-items: end;
                 justify-items: stretch;
@@ -441,7 +522,45 @@
         </div>
 
         <div id="status" class="status">Initializing Pagefind...</div>
+        <nav class="pagination pagination-top" data-pagination aria-label="顶部搜索结果分页" hidden>
+            <button type="button" data-page-action="first">首页</button>
+            <button type="button" data-page-action="previous">上一页</button>
+            <form class="pagination-form" data-pagination-form>
+                <input
+                    class="pagination-input"
+                    data-pagination-input
+                    type="number"
+                    min="1"
+                    step="1"
+                    inputmode="numeric"
+                    aria-label="页码"
+                >
+                <span class="pagination-total" data-pagination-total>/ 1</span>
+                <button type="submit" data-pagination-go>跳转</button>
+            </form>
+            <button type="button" data-page-action="next">下一页</button>
+            <button type="button" data-page-action="last">末页</button>
+        </nav>
         <section id="results" class="results" aria-live="polite"></section>
+        <nav class="pagination pagination-bottom" data-pagination aria-label="底部搜索结果分页" hidden>
+            <button type="button" data-page-action="first">首页</button>
+            <button type="button" data-page-action="previous">上一页</button>
+            <form class="pagination-form" data-pagination-form>
+                <input
+                    class="pagination-input"
+                    data-pagination-input
+                    type="number"
+                    min="1"
+                    step="1"
+                    inputmode="numeric"
+                    aria-label="页码"
+                >
+                <span class="pagination-total" data-pagination-total>/ 1</span>
+                <button type="submit" data-pagination-go>跳转</button>
+            </form>
+            <button type="button" data-page-action="next">下一页</button>
+            <button type="button" data-page-action="last">末页</button>
+        </nav>
     </main>
 
     <div id="drawer-backdrop" class="drawer-backdrop" hidden>

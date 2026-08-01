@@ -1,7 +1,14 @@
 import * as pagefind from "./pagefind/chs/pagefind.js";
 import { MyDomElement, parse as parseRichText } from "./textStyleParse.js";
+import {
+    ExactMatchPaginationError,
+    buildExactMatchIndex,
+    getPageSlices
+} from "./searchPagination.js";
 
 const BUCKET_COUNT = 512;
+const PAGE_SIZE = 20;
+const NUMBER_FORMATTER = new Intl.NumberFormat("en-US");
 
 const LANGUAGE_LABELS = {
     chs: "简体中文",
@@ -27,6 +34,17 @@ const form = document.getElementById("search-form");
 const languageSelect = document.getElementById("language-select");
 const status = document.getElementById("status");
 const results = document.getElementById("results");
+const paginationControls = Array.from(document.querySelectorAll("[data-pagination]"), (element) => ({
+    element,
+    first: element.querySelector('[data-page-action="first"]'),
+    previous: element.querySelector('[data-page-action="previous"]'),
+    next: element.querySelector('[data-page-action="next"]'),
+    last: element.querySelector('[data-page-action="last"]'),
+    form: element.querySelector("[data-pagination-form]"),
+    input: element.querySelector("[data-pagination-input]"),
+    total: element.querySelector("[data-pagination-total]"),
+    go: element.querySelector("[data-pagination-go]")
+}));
 const drawerBackdrop = document.getElementById("drawer-backdrop");
 const contextDrawer = document.getElementById("context-drawer");
 const drawerClose = document.getElementById("drawer-close");
@@ -35,8 +53,10 @@ const drawerSubtitle = document.getElementById("drawer-subtitle");
 const drawerContent = document.getElementById("drawer-content");
 
 let searchToken = 0;
+let pageRenderToken = 0;
 let activeLanguage = languageSelect.value;
 let initializedLanguage = null;
+let activeSearchSession = null;
 
 const textBucketCache = new Map();
 const metaBucketCache = new Map();
@@ -171,6 +191,7 @@ function wrapExactQuery(value) {
 }
 
 function setPlaceholder(message) {
+    renderedItems.clear();
     results.innerHTML = `<div class="placeholder">${message}</div>`;
 }
 
@@ -180,57 +201,6 @@ function waitForNextPaint() {
             requestAnimationFrame(resolve);
         });
     });
-}
-
-function stripHtml(value) {
-    return String(value ?? "").replace(/<[^>]+>/g, "");
-}
-
-function compactTextForMatch(value) {
-    return stripHtml(value)
-        .replace(/\s+/g, "")
-        .trim()
-        .toLowerCase();
-}
-
-function buildMatchInfo(item, rawKeyword, language) {
-    const compactQuery = compactTextForMatch(rawKeyword);
-    if (!compactQuery) {
-        return null;
-    }
-
-    const candidates = [
-        item.searchLanguageText,
-        item.title,
-        item.excerpt
-    ];
-
-    if (item.texts[language] && item.texts[language] !== item.searchLanguageText) {
-        candidates.push(item.texts[language]);
-    }
-
-    let bestIndex = Number.POSITIVE_INFINITY;
-    let bestField = "";
-
-    for (const candidate of candidates) {
-        const compactCandidate = compactTextForMatch(candidate);
-        const matchIndex = compactCandidate.indexOf(compactQuery);
-
-        if (matchIndex !== -1 && matchIndex < bestIndex) {
-            bestIndex = matchIndex;
-            bestField = candidate;
-        }
-    }
-
-    if (!Number.isFinite(bestIndex)) {
-        return null;
-    }
-
-    return {
-        compactLength: compactQuery.length,
-        fieldLength: compactTextForMatch(bestField).length,
-        index: bestIndex
-    };
 }
 
 async function loadTextBucket(language, bucketId) {
@@ -451,18 +421,39 @@ function buildResultSourceMeta(item, keyword = "") {
     };
 }
 
-function flattenResults(searchResults, loadedDocuments, language, keyword) {
+function validateExactMatchDocument(searchResult, document, resultIndex) {
+    const exactMatches = searchResult.exactMatches;
+    const subResults = document?.sub_results;
+    const expectedCount = searchResult.exactMatchCount;
+    const resultLabel = searchResult.id || `#${resultIndex}`;
+
+    if (!Array.isArray(exactMatches) || exactMatches.length !== expectedCount) {
+        throw new Error(
+            `Pagefind exact-match contract mismatch for ${resultLabel}: `
+            + `expected ${expectedCount} exactMatches, received ${exactMatches?.length ?? "none"}.`
+        );
+    }
+    if (!Array.isArray(subResults) || subResults.length !== expectedCount) {
+        throw new Error(
+            `Pagefind exact-match contract mismatch for ${resultLabel}: `
+            + `expected ${expectedCount} sub_results, received ${subResults?.length ?? "none"}.`
+        );
+    }
+
+    for (let index = 0; index < expectedCount; index += 1) {
+        if (exactMatches[index].sectionStart !== subResults[index].anchor?.location) {
+            throw new Error(
+                `Pagefind exact-match section order mismatch for ${resultLabel} at entry ${index}.`
+            );
+        }
+    }
+}
+
+function flattenPageSlices(loadedSlices, language, keyword) {
     const flattened = [];
 
-    loadedDocuments.forEach((document, index) => {
-        const searchResult = searchResults[index];
-        const subResults = Array.isArray(document.sub_results) ? document.sub_results : [];
-
-        if (!subResults.length) {
-            return;
-        }
-
-        subResults.forEach((subResult) => {
+    loadedSlices.forEach(({ document, searchResult, slice }) => {
+        document.sub_results.slice(slice.from, slice.to).forEach((subResult) => {
             const hash = extractRecordIdFromResult(subResult);
             const parsed = parseRecordId(hash);
             const displayLanguages = parsed.sourceType === "subtitle"
@@ -491,37 +482,6 @@ function flattenResults(searchResults, loadedDocuments, language, keyword) {
     return flattened;
 }
 
-function filterAndSortResults(items, rawKeyword, language) {
-    return items
-        .map((item) => {
-            const match = buildMatchInfo(item, rawKeyword, language);
-            if (!match) {
-                return null;
-            }
-
-            return {
-                ...item,
-                match
-            };
-        })
-        .filter(Boolean)
-        .sort((left, right) => {
-            if (left.match.index !== right.match.index) {
-                return left.match.index - right.match.index;
-            }
-
-            if (left.match.compactLength !== right.match.compactLength) {
-                return right.match.compactLength - left.match.compactLength;
-            }
-
-            if (left.match.fieldLength !== right.match.fieldLength) {
-                return left.match.fieldLength - right.match.fieldLength;
-            }
-
-            return right.score - left.score;
-        });
-}
-
 function renderSourceControl(item, resultId) {
     const sourceLabel = item.origin || `${getSourceTypeLabel(item.sourceType)}：${item.hash || "-"}`;
     const clickableClass = item.canOpenContext ? " is-clickable" : "";
@@ -538,35 +498,51 @@ function renderSourceControl(item, resultId) {
     `;
 }
 
-function renderItems(items, language) {
+function renderItems(items, language, keyword) {
     const languageLabel = getLanguageLabel(language);
     renderedItems.clear();
+    const resultFragment = document.createDocumentFragment();
 
-    results.innerHTML = items.map((item, index) => {
+    items.forEach((item, index) => {
         const resultId = `${item.contextKey || item.hash || "result"}-${index}`;
         renderedItems.set(resultId, item);
 
         const displayLanguages = item.displayLanguages?.length ? item.displayLanguages : getDisplayLanguages(language);
-        const textBlocks = displayLanguages.map((displayLanguage) => `
-                <div class="excerpt-block">
-                    <p class="excerpt-label">${escapeHtml(getLanguageLabel(displayLanguage))}</p>
-                    <p class="excerpt">${escapeHtml(item.texts[displayLanguage] || "No text available.")}</p>
-                </div>
-        `).join("");
-
-        return `
-        <article class="result">
+        const article = document.createElement("article");
+        article.className = "result";
+        article.innerHTML = `
             <span class="result-kind">Matched in ${escapeHtml(languageLabel)}</span>
             <h2>${escapeHtml(item.title)}</h2>
             ${renderSourceControl(item, resultId)}
             <p class="result-path">Pagefind source: ${escapeHtml(item.url || "-")}</p>
             <p class="result-hash">id: ${escapeHtml(item.hash || "-")}</p>
-            <div class="excerpt-group">
-${textBlocks}
-            </div>
-        </article>
-    `;
-    }).join("");
+            <div class="excerpt-group"></div>
+        `;
+
+        const excerptGroup = article.querySelector(".excerpt-group");
+        for (const displayLanguage of displayLanguages) {
+            const block = document.createElement("div");
+            block.className = "excerpt-block";
+
+            const label = document.createElement("p");
+            label.className = "excerpt-label";
+            label.textContent = getLanguageLabel(displayLanguage);
+
+            const excerpt = document.createElement("div");
+            excerpt.className = "excerpt";
+            excerpt.appendChild(stylizeText(
+                item.texts[displayLanguage] || "No text available.",
+                keyword
+            ));
+
+            block.append(label, excerpt);
+            excerptGroup.appendChild(block);
+        }
+
+        resultFragment.appendChild(article);
+    });
+
+    results.replaceChildren(resultFragment);
 }
 
 function _createStyledSpan(node) {
@@ -1053,6 +1029,148 @@ function closeContextDrawer() {
     }, 240);
 }
 
+function clearSearchSession() {
+    activeSearchSession = null;
+    pageRenderToken += 1;
+    renderedItems.clear();
+    for (const controls of paginationControls) {
+        controls.element.hidden = true;
+    }
+    results.setAttribute("aria-busy", "false");
+}
+
+function setPaginationControls(session, pageState, isLoading) {
+    const hasMultiplePages = Boolean(session) && pageState.totalPages > 1;
+    results.setAttribute("aria-busy", isLoading ? "true" : "false");
+
+    for (const controls of paginationControls) {
+        controls.element.hidden = !hasMultiplePages;
+
+        if (!session || pageState.totalPages === 0) {
+            continue;
+        }
+
+        controls.input.value = String(pageState.page);
+        controls.input.max = String(pageState.totalPages);
+        controls.total.textContent = `/ ${NUMBER_FORMATTER.format(pageState.totalPages)}`;
+
+        controls.first.disabled = isLoading || pageState.page <= 1;
+        controls.previous.disabled = isLoading || pageState.page <= 1;
+        controls.next.disabled = isLoading || pageState.page >= pageState.totalPages;
+        controls.last.disabled = isLoading || pageState.page >= pageState.totalPages;
+        controls.input.disabled = isLoading;
+        controls.go.disabled = isLoading;
+    }
+}
+
+function updatePageStatus(session, pageState, isLoading) {
+    const total = NUMBER_FORMATTER.format(session.index.total);
+    const page = NUMBER_FORMATTER.format(pageState.page);
+    const totalPages = NUMBER_FORMATTER.format(pageState.totalPages);
+
+    if (isLoading) {
+        status.textContent = `找到 ${total} 条，正在加载第 ${page} / ${totalPages} 页...`;
+        return;
+    }
+
+    const firstResult = NUMBER_FORMATTER.format(pageState.start + 1);
+    const lastResult = NUMBER_FORMATTER.format(pageState.end);
+    status.textContent = `找到 ${total} 条，正在显示 ${firstResult}–${lastResult} 条，第 ${page} / ${totalPages} 页`;
+}
+
+function loadSessionFragment(session, resultIndex) {
+    if (!session.fragmentPromises.has(resultIndex)) {
+        const promise = Promise.resolve()
+            .then(() => session.searchResults[resultIndex].data())
+            .catch((error) => {
+                session.fragmentPromises.delete(resultIndex);
+                throw error;
+            });
+        session.fragmentPromises.set(resultIndex, promise);
+    }
+
+    return session.fragmentPromises.get(resultIndex);
+}
+
+async function renderSearchPage(session, requestedPage) {
+    if (session !== activeSearchSession || session.searchToken !== searchToken) {
+        return false;
+    }
+
+    const pageState = getPageSlices(session.index, requestedPage, PAGE_SIZE);
+    const currentPageRenderToken = ++pageRenderToken;
+    session.currentPage = pageState.page;
+    session.loading = true;
+
+    setPaginationControls(session, pageState, true);
+    updatePageStatus(session, pageState, true);
+    setPlaceholder(`正在加载第 ${NUMBER_FORMATTER.format(pageState.page)} 页的匹配 fragment 和双语文本...`);
+    await waitForNextPaint();
+
+    if (
+        session !== activeSearchSession
+        || session.searchToken !== searchToken
+        || currentPageRenderToken !== pageRenderToken
+    ) {
+        return false;
+    }
+
+    try {
+        const loadedSlices = await Promise.all(pageState.slices.map(async (slice) => {
+            const searchResult = session.searchResults[slice.resultIndex];
+            const document = await loadSessionFragment(session, slice.resultIndex);
+            validateExactMatchDocument(searchResult, document, slice.resultIndex);
+            return { slice, searchResult, document };
+        }));
+
+        if (
+            session !== activeSearchSession
+            || session.searchToken !== searchToken
+            || currentPageRenderToken !== pageRenderToken
+        ) {
+            return false;
+        }
+
+        const items = flattenPageSlices(loadedSlices, session.language, session.keyword);
+        const hydratedItems = await hydrateOriginalTexts(items, session.language);
+
+        if (
+            session !== activeSearchSession
+            || session.searchToken !== searchToken
+            || currentPageRenderToken !== pageRenderToken
+        ) {
+            return false;
+        }
+
+        if (hydratedItems.length !== pageState.end - pageState.start) {
+            throw new Error(
+                `Expected ${pageState.end - pageState.start} paged results, received ${hydratedItems.length}.`
+            );
+        }
+
+        renderItems(hydratedItems, session.language, session.keyword);
+        session.loading = false;
+        setPaginationControls(session, pageState, false);
+        updatePageStatus(session, pageState, false);
+        return true;
+    } catch (error) {
+        if (
+            session !== activeSearchSession
+            || session.searchToken !== searchToken
+            || currentPageRenderToken !== pageRenderToken
+        ) {
+            return false;
+        }
+
+        console.error(error);
+        session.loading = false;
+        setPaginationControls(session, pageState, false);
+        status.textContent = `第 ${NUMBER_FORMATTER.format(pageState.page)} 页加载失败。`;
+        setPlaceholder("分页结果加载失败。请重试当前页，并在 DevTools 中检查 fragment 或 text-data 请求。");
+        return false;
+    }
+}
+
 async function ensureReady(language) {
     if (initializedLanguage === language) {
         return;
@@ -1068,6 +1186,7 @@ async function ensureReady(language) {
 
 async function runSearch(term, language) {
     const currentToken = ++searchToken;
+    clearSearchSession();
     const keyword = term.trim();
     const processedKeyword = preprocessForCharacterSearch(keyword);
     const exactKeyword = wrapExactQuery(processedKeyword);
@@ -1089,39 +1208,53 @@ async function runSearch(term, language) {
             return;
         }
 
-        const exactMatchCount = search.exactMatchCount;
-        status.textContent = `找到 ${exactMatchCount.toLocaleString("en-US")} 条`;
+        const index = buildExactMatchIndex(search.results);
+        if (
+            Number.isSafeInteger(search.exactMatchCount)
+            && search.exactMatchCount !== index.total
+        ) {
+            console.warn(
+                `Pagefind exactMatchCount mismatch: response=${search.exactMatchCount}, results=${index.total}. `
+                + "Using the per-result prefix sum."
+            );
+        }
 
-        if (exactMatchCount === 0) {
+        status.textContent = `找到 ${NUMBER_FORMATTER.format(index.total)} 条`;
+
+        if (index.total === 0) {
+            for (const controls of paginationControls) {
+                controls.element.hidden = true;
+            }
             setPlaceholder("没有找到匹配结果。可以尝试更短或更常见的关键词。");
             return;
         }
 
-        await waitForNextPaint();
-
-        if (currentToken !== searchToken) {
-            return;
-        }
-
-        const documents = await Promise.all(search.results.map((result) => result.data()));
-        const items = flattenResults(search.results, documents, language, keyword);
-        const hydratedItems = await hydrateOriginalTexts(items, language);
-        const filteredItems = filterAndSortResults(hydratedItems, keyword, language);
-
-        if (currentToken !== searchToken) {
-            return;
-        }
-
-        if (!filteredItems.length) {
-            setPlaceholder("Pagefind 找到了粗略匹配，但没有结果通过前端连续命中过滤。");
-            return;
-        }
-
-        renderItems(filteredItems, language);
+        const session = {
+            searchToken: currentToken,
+            keyword,
+            language,
+            searchResults: search.results,
+            index,
+            currentPage: 1,
+            loading: false,
+            fragmentPromises: new Map()
+        };
+        activeSearchSession = session;
+        await renderSearchPage(session, 1);
     } catch (error) {
+        if (currentToken !== searchToken) {
+            return;
+        }
+
         console.error(error);
-        status.textContent = "搜索失败。请通过 HTTP server 打开本页面，不要直接双击 HTML 文件。";
-        setPlaceholder("初始化或搜索失败。请在 DevTools 中检查 <code>pagefind</code> 或 <code>text-data</code> 请求是否缺失。");
+        clearSearchSession();
+        if (error instanceof ExactMatchPaginationError) {
+            status.textContent = "当前 Pagefind 搜索结果不支持精确分页。";
+            setPlaceholder(escapeHtml(error.message));
+        } else {
+            status.textContent = "搜索失败。请通过 HTTP server 打开本页面，不要直接双击 HTML 文件。";
+            setPlaceholder("初始化或搜索失败。请在 DevTools 中检查 <code>pagefind</code> 或 <code>text-data</code> 请求是否缺失。");
+        }
     }
 }
 
@@ -1135,6 +1268,8 @@ form.addEventListener("submit", (event) => {
 });
 
 languageSelect.addEventListener("change", async () => {
+    const currentToken = ++searchToken;
+    clearSearchSession();
     const language = languageSelect.value;
     syncLanguageUI(language);
     status.textContent = `正在切换到 ${getLanguageLabel(language)} 索引...`;
@@ -1142,11 +1277,53 @@ languageSelect.addEventListener("change", async () => {
 
     try {
         await ensureReady(language);
+        if (currentToken !== searchToken) {
+            return;
+        }
     } catch (error) {
         console.error(error);
         status.textContent = `切换到 ${getLanguageLabel(language)} 索引失败。`;
     }
 });
+
+async function navigateToPage(page) {
+    const session = activeSearchSession;
+    if (!session || session.loading) {
+        return;
+    }
+
+    const pageState = getPageSlices(session.index, page, PAGE_SIZE);
+    if (pageState.page === session.currentPage) {
+        setPaginationControls(session, pageState, false);
+        return;
+    }
+
+    await renderSearchPage(session, pageState.page);
+}
+
+for (const controls of paginationControls) {
+    controls.element.addEventListener("click", (event) => {
+        const button = event.target.closest("button[data-page-action]");
+        const session = activeSearchSession;
+        if (!button || !session || session.loading) {
+            return;
+        }
+
+        const totalPages = Math.ceil(session.index.total / PAGE_SIZE);
+        const targetPages = {
+            first: 1,
+            previous: session.currentPage - 1,
+            next: session.currentPage + 1,
+            last: totalPages
+        };
+        navigateToPage(targetPages[button.dataset.pageAction]);
+    });
+
+    controls.form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        navigateToPage(controls.input.value);
+    });
+}
 
 results.addEventListener("click", (event) => {
     const button = event.target.closest(".origin-action[data-result-id]");
