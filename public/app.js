@@ -5,6 +5,13 @@ import {
     buildExactMatchIndex,
     getPageSlices
 } from "./searchPagination.js";
+import {
+    LatestSearchCoordinator,
+    isAbortError,
+    loadCachedJson,
+    raceWithSignal,
+    throwIfAborted
+} from "./searchLifecycle.js";
 
 const BUCKET_COUNT = 512;
 const PAGE_SIZE = 20;
@@ -58,7 +65,9 @@ let activeLanguage = languageSelect.value;
 let initializedLanguage = null;
 let activeSearchSession = null;
 
+const searchCoordinator = new LatestSearchCoordinator();
 const textBucketCache = new Map();
+const textBucketRequests = new Map();
 const metaBucketCache = new Map();
 const renderedItems = new Map();
 const namesCache = {};
@@ -203,21 +212,16 @@ function waitForNextPaint() {
     });
 }
 
-async function loadTextBucket(language, bucketId) {
+async function loadTextBucket(language, bucketId, options = {}) {
     const cacheKey = `${language}:${bucketId}`;
-
-    if (!textBucketCache.has(cacheKey)) {
-        textBucketCache.set(cacheKey, (async () => {
-            const response = await fetch(getTextBucketUrl(language, bucketId));
-            if (!response.ok) {
-                throw new Error(`Failed to load text bucket: ${language}/${bucketId}`);
-            }
-
-            return response.json();
-        })());
-    }
-
-    return textBucketCache.get(cacheKey);
+    return loadCachedJson({
+        key: cacheKey,
+        url: getTextBucketUrl(language, bucketId),
+        resolvedCache: textBucketCache,
+        pendingRequests: options.pendingRequests || textBucketRequests,
+        signal: options.signal,
+        errorMessage: `Failed to load text bucket: ${language}/${bucketId}`
+    });
 }
 
 function loadLookupTable(language, fileName, cache) {
@@ -365,7 +369,9 @@ function extractRecordIdFromResult(subResult) {
     return "unknown";
 }
 
-async function hydrateOriginalTexts(items, language) {
+async function hydrateOriginalTexts(items, language, options = {}) {
+    throwIfAborted(options.signal);
+
     return Promise.all(items.map(async (item) => {
         if (item.kind !== "hash" || !item.hash) {
             return item;
@@ -380,9 +386,13 @@ async function hydrateOriginalTexts(items, language) {
 
         const textEntries = await Promise.all(displayLanguages.map(async (displayLanguage) => {
             try {
-                const bucket = await loadTextBucket(displayLanguage, bucketId);
+                const bucket = await loadTextBucket(displayLanguage, bucketId, options);
                 return [displayLanguage, String(bucket[lookupKey] ?? "")];
             } catch (error) {
+                if (isAbortError(error, options.signal)) {
+                    throw error;
+                }
+
                 console.warn(error);
                 return [displayLanguage, ""];
             }
@@ -1080,8 +1090,12 @@ function updatePageStatus(session, pageState, isLoading) {
 
 function loadSessionFragment(session, resultIndex) {
     if (!session.fragmentPromises.has(resultIndex)) {
-        const promise = Promise.resolve()
-            .then(() => session.searchResults[resultIndex].data())
+        const dataPromise = Promise.resolve()
+            .then(() => {
+                throwIfAborted(session.signal);
+                return session.searchResults[resultIndex].data();
+            });
+        const promise = raceWithSignal(dataPromise, session.signal)
             .catch((error) => {
                 session.fragmentPromises.delete(resultIndex);
                 throw error;
@@ -1093,12 +1107,17 @@ function loadSessionFragment(session, resultIndex) {
 }
 
 async function renderSearchPage(session, requestedPage) {
-    if (session !== activeSearchSession || session.searchToken !== searchToken) {
+    if (
+        session !== activeSearchSession
+        || session.searchToken !== searchToken
+        || !searchCoordinator.isCurrent(session.searchRun)
+    ) {
         return false;
     }
 
     const pageState = getPageSlices(session.index, requestedPage, PAGE_SIZE);
     const currentPageRenderToken = ++pageRenderToken;
+    searchCoordinator.setBusy(session.searchRun, true);
     session.currentPage = pageState.page;
     session.loading = true;
 
@@ -1111,6 +1130,7 @@ async function renderSearchPage(session, requestedPage) {
         session !== activeSearchSession
         || session.searchToken !== searchToken
         || currentPageRenderToken !== pageRenderToken
+        || !searchCoordinator.isCurrent(session.searchRun)
     ) {
         return false;
     }
@@ -1127,17 +1147,22 @@ async function renderSearchPage(session, requestedPage) {
             session !== activeSearchSession
             || session.searchToken !== searchToken
             || currentPageRenderToken !== pageRenderToken
+            || !searchCoordinator.isCurrent(session.searchRun)
         ) {
             return false;
         }
 
         const items = flattenPageSlices(loadedSlices, session.language, session.keyword);
-        const hydratedItems = await hydrateOriginalTexts(items, session.language);
+        const hydratedItems = await hydrateOriginalTexts(items, session.language, {
+            signal: session.signal,
+            pendingRequests: session.textBucketPromises
+        });
 
         if (
             session !== activeSearchSession
             || session.searchToken !== searchToken
             || currentPageRenderToken !== pageRenderToken
+            || !searchCoordinator.isCurrent(session.searchRun)
         ) {
             return false;
         }
@@ -1150,20 +1175,27 @@ async function renderSearchPage(session, requestedPage) {
 
         renderItems(hydratedItems, session.language, session.keyword);
         session.loading = false;
+        searchCoordinator.setBusy(session.searchRun, false);
         setPaginationControls(session, pageState, false);
         updatePageStatus(session, pageState, false);
         return true;
     } catch (error) {
+        if (isAbortError(error, session.signal)) {
+            return false;
+        }
+
         if (
             session !== activeSearchSession
             || session.searchToken !== searchToken
             || currentPageRenderToken !== pageRenderToken
+            || !searchCoordinator.isCurrent(session.searchRun)
         ) {
             return false;
         }
 
         console.error(error);
         session.loading = false;
+        searchCoordinator.setBusy(session.searchRun, false);
         setPaginationControls(session, pageState, false);
         status.textContent = `第 ${NUMBER_FORMATTER.format(pageState.page)} 页加载失败。`;
         setPlaceholder("分页结果加载失败。请重试当前页，并在 DevTools 中检查 fragment 或 text-data 请求。");
@@ -1185,26 +1217,45 @@ async function ensureReady(language) {
 }
 
 async function runSearch(term, language) {
-    const currentToken = ++searchToken;
-    clearSearchSession();
     const keyword = term.trim();
     const processedKeyword = preprocessForCharacterSearch(keyword);
     const exactKeyword = wrapExactQuery(processedKeyword);
 
     if (!keyword) {
+        searchCoordinator.cancel();
+        searchToken += 1;
+        clearSearchSession();
         status.textContent = "请输入关键词。";
         setPlaceholder("结果会显示在这里。页面将查询所选语言索引，并从 text-data 文本桶加载展示文本。");
         return;
     }
+
+    const requestKey = `${language}\u0000${keyword}`;
+    const { accepted, run } = searchCoordinator.start(requestKey);
+    if (!accepted) {
+        return;
+    }
+
+    const currentToken = ++searchToken;
+    clearSearchSession();
 
     status.textContent = `正在用 ${getLanguageLabel(language)} 检索 "${keyword}"，精确查询为 ${exactKeyword} ...`;
     setPlaceholder("正在按需加载匹配索引分片和文本桶...");
 
     try {
         await ensureReady(language);
-        const search = await pagefind.search(exactKeyword, {});
+        throwIfAborted(run.signal);
+        const search = await raceWithSignal(
+            pagefind.search(exactKeyword, {}),
+            run.signal
+        );
+        throwIfAborted(run.signal);
 
-        if (!search || currentToken !== searchToken) {
+        if (
+            !search
+            || currentToken !== searchToken
+            || !searchCoordinator.isCurrent(run)
+        ) {
             return;
         }
 
@@ -1222,6 +1273,7 @@ async function runSearch(term, language) {
         status.textContent = `找到 ${NUMBER_FORMATTER.format(index.total)} 条`;
 
         if (index.total === 0) {
+            searchCoordinator.setBusy(run, false);
             for (const controls of paginationControls) {
                 controls.element.hidden = true;
             }
@@ -1231,22 +1283,31 @@ async function runSearch(term, language) {
 
         const session = {
             searchToken: currentToken,
+            searchRun: run,
+            controller: run.controller,
+            signal: run.signal,
             keyword,
             language,
             searchResults: search.results,
             index,
             currentPage: 1,
             loading: false,
-            fragmentPromises: new Map()
+            fragmentPromises: new Map(),
+            textBucketPromises: new Map()
         };
         activeSearchSession = session;
         await renderSearchPage(session, 1);
     } catch (error) {
-        if (currentToken !== searchToken) {
+        if (
+            isAbortError(error, run.signal)
+            || currentToken !== searchToken
+            || !searchCoordinator.isCurrent(run)
+        ) {
             return;
         }
 
         console.error(error);
+        searchCoordinator.setBusy(run, false);
         clearSearchSession();
         if (error instanceof ExactMatchPaginationError) {
             status.textContent = "当前 Pagefind 搜索结果不支持精确分页。";
@@ -1268,6 +1329,7 @@ form.addEventListener("submit", (event) => {
 });
 
 languageSelect.addEventListener("change", async () => {
+    searchCoordinator.cancel();
     const currentToken = ++searchToken;
     clearSearchSession();
     const language = languageSelect.value;
