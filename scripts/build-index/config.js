@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { DATA_PATH } from "../build_meta.js";
 
 export const PREPROCESS_CONCURRENCY = 64;
 export const INDEX_CONCURRENCY = 4;
@@ -8,9 +9,9 @@ export const TEXT_DATA_OUTPUT_ROOT = path.resolve("./public/text-data");
 export const META_DATA_OUTPUT_ROOT = path.resolve("./public/meta-data");
 export const TEMP_INDEX_OUTPUT_ROOT = path.resolve("./.tmp-pagefind-html");
 export const LEGACY_CHUNK_OUTPUT_ROOT = path.resolve("./public/chunk");
-export const TEXTMAP_SOURCE_ROOT = path.resolve("./TextMap");
-export const READABLE_SOURCE_ROOT = path.resolve("./Readable");
-export const SUBTITLE_SOURCE_ROOT = path.resolve("./Subtitle");
+export const TEXTMAP_SOURCE_ROOT = path.join(DATA_PATH, "TextMap");
+export const READABLE_SOURCE_ROOT = path.join(DATA_PATH, "Readable");
+export const SUBTITLE_SOURCE_ROOT = path.join(DATA_PATH, "Subtitle");
 export const DEFAULT_LANGUAGE_IDS = ["chs", "en"];
 
 const TEXTMAP_FILE_RE = /^TextMap(?:_Medium)?([A-Za-z]+)(?:_(\d+))?\.json$/;
