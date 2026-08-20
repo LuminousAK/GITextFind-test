@@ -2,6 +2,8 @@ import { loadCachedJson } from "../search/searchLifecycle.js";
 
 export function createTextRepository({
     baseUrl,
+    textDataBaseUrls = {},
+    metaDataBaseUrl = null,
     fetchImpl = fetch,
     logger = console
 }) {
@@ -13,6 +15,10 @@ export function createTextRepository({
     const sourceTitlesCache = {};
 
     function getTextDataUrl(language, fileName) {
+        const languageBaseUrl = textDataBaseUrls[language];
+        if (languageBaseUrl) {
+            return new URL(fileName, languageBaseUrl).href;
+        }
         return new URL(`./text-data/${language}/${fileName}`, baseUrl).href;
     }
 
@@ -21,7 +27,7 @@ export function createTextRepository({
     }
 
     async function loadTextBucket(language, bucketId, options = {}) {
-        const cacheKey = `${language}:${bucketId}`;
+        const cacheKey = `${getTextDataUrl(language, "")}:${bucketId}`;
         return loadCachedJson({
             key: cacheKey,
             url: getTextBucketUrl(language, bucketId),
@@ -67,7 +73,9 @@ export function createTextRepository({
 
         if (!metaBucketCache.has(cacheKey)) {
             metaBucketCache.set(cacheKey, (async () => {
-                const url = new URL(`./meta-data/${bucketType}/${bucketId}.json`, baseUrl).href;
+                const url = metaDataBaseUrl
+                    ? new URL(`${bucketType}/${bucketId}.json`, metaDataBaseUrl).href
+                    : new URL(`./meta-data/${bucketType}/${bucketId}.json`, baseUrl).href;
                 const response = await fetchImpl(url);
                 if (!response.ok) {
                     return {};

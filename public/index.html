@@ -497,14 +497,11 @@
     <main class="shell">
         <h1>GI Text Search Demo</h1>
         <p class="lead">
-            选择简体中文或 English 索引进行检索，命中后从对应语言的文本桶加载展示文本。
+            选择可用语言索引进行检索，命中后加载对应文本桶。
         </p>
 
         <form class="searchbar" id="search-form">
-            <select id="language-select" aria-label="Search language">
-                <option value="chs">简体中文</option>
-                <option value="en">English</option>
-            </select>
+            <select id="language-select" aria-label="Search language"></select>
             <input
                 id="search-input"
                 type="search"
@@ -516,9 +513,9 @@
         </form>
 
         <div class="meta-bar">
-            <span class="tip">Index root: <code>./pagefind/&lt;language&gt;/</code></span>
-            <span class="tip">Text data: <code>./text-data/&lt;language&gt;/&lt;bucket&gt;.json</code></span>
-            <span class="tip">Render mode: <code>search language + 简体中文 + English</code></span>
+            <span class="tip">Data source: <code>runtime-config.json → R2 manifests</code></span>
+            <span class="tip">Index: <code>languages/&lt;language&gt;/releases/&lt;version&gt;/pagefind/</code></span>
+            <span class="tip">Text: <code>languages/&lt;language&gt;/releases/&lt;version&gt;/text-data/</code></span>
         </div>
 
         <div id="status" class="status">Initializing Pagefind...</div>

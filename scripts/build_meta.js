@@ -3,7 +3,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 export const DATA_PATH = process.env.GI_DATA_PATH || "E:\\animegamedata2";
-export const OUTPUT_ROOT = path.resolve("./public/meta-data");
+export const OUTPUT_ROOT = path.resolve("./dist/meta-data-standalone");
 export const BUCKET_COUNT = 512;
 
 export function getBucketId(hash) {

@@ -4,11 +4,11 @@ import { DATA_PATH } from "../build_meta.js";
 
 export const PREPROCESS_CONCURRENCY = 64;
 export const INDEX_CONCURRENCY = 4;
-export const PAGEFIND_OUTPUT_ROOT = path.resolve("./public/pagefind");
-export const TEXT_DATA_OUTPUT_ROOT = path.resolve("./public/text-data");
-export const META_DATA_OUTPUT_ROOT = path.resolve("./public/meta-data");
+export const DIST_OUTPUT_ROOT = path.resolve("./dist");
+export const R2_OUTPUT_ROOT = path.join(DIST_OUTPUT_ROOT, "r2");
+export const SHARED_OUTPUT_ROOT = path.join(R2_OUTPUT_ROOT, "shared");
+export const LANGUAGES_OUTPUT_ROOT = path.join(R2_OUTPUT_ROOT, "languages");
 export const TEMP_INDEX_OUTPUT_ROOT = path.resolve("./.tmp-pagefind-html");
-export const LEGACY_CHUNK_OUTPUT_ROOT = path.resolve("./public/chunk");
 export const TEXTMAP_SOURCE_ROOT = path.join(DATA_PATH, "TextMap");
 export const READABLE_SOURCE_ROOT = path.join(DATA_PATH, "Readable");
 export const SUBTITLE_SOURCE_ROOT = path.join(DATA_PATH, "Subtitle");
@@ -104,7 +104,10 @@ export function compareTextMapFiles(left, right) {
  * @param {string[] | null} requestedLanguageIds
  * @returns {LanguageConfig[]}
  */
-export function discoverLanguageConfigs(requestedLanguageIds = DEFAULT_LANGUAGE_IDS) {
+export function discoverLanguageConfigs(
+    requestedLanguageIds = DEFAULT_LANGUAGE_IDS,
+    { datasetVersion = "unversioned" } = {}
+) {
     const languagesById = new Map();
 
     function ensureLanguageConfig(id) {
@@ -152,15 +155,22 @@ export function discoverLanguageConfigs(requestedLanguageIds = DEFAULT_LANGUAGE_
     }
 
     const allLanguageConfigs = Array.from(languagesById.values())
-        .map((config) => ({
-            ...config,
-            sourceFiles: config.sourceFiles.sort(compareTextMapFiles),
-            readableSourceDir: path.join(READABLE_SOURCE_ROOT, config.id.toUpperCase()),
-            subtitleSourceDir: path.join(SUBTITLE_SOURCE_ROOT, config.id.toUpperCase()),
-            pagefindOutputDir: path.join(PAGEFIND_OUTPUT_ROOT, config.id),
-            textDataOutputDir: path.join(TEXT_DATA_OUTPUT_ROOT, config.id),
-            tempIndexOutputDir: path.join(TEMP_INDEX_OUTPUT_ROOT, config.id)
-        }))
+        .map((config) => {
+            const languageOutputRoot = path.join(LANGUAGES_OUTPUT_ROOT, config.id);
+            const releaseOutputRoot = path.join(languageOutputRoot, "releases", datasetVersion);
+
+            return {
+                ...config,
+                sourceFiles: config.sourceFiles.sort(compareTextMapFiles),
+                readableSourceDir: path.join(READABLE_SOURCE_ROOT, config.id.toUpperCase()),
+                subtitleSourceDir: path.join(SUBTITLE_SOURCE_ROOT, config.id.toUpperCase()),
+                languageOutputRoot,
+                releaseOutputRoot,
+                pagefindOutputDir: path.join(releaseOutputRoot, "pagefind"),
+                textDataOutputDir: path.join(releaseOutputRoot, "text-data"),
+                tempIndexOutputDir: path.join(TEMP_INDEX_OUTPUT_ROOT, config.id)
+            };
+        })
         .sort((left, right) => left.id.localeCompare(right.id));
 
     if (requestedLanguageIds === null) {

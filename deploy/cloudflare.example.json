@@ -1,0 +1,6 @@
+{
+  "r2PublicBaseUrl": "https://assets.example.com/",
+  "languages": ["chs", "en"],
+  "defaultLanguage": "chs",
+  "comparisonLanguages": ["chs", "en"]
+}

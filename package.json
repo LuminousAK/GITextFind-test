@@ -2,16 +2,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node --env-file=.env.pagefind.local scripts/build_index.js",
-    "build:meta": "node --env-file=.env.pagefind.local scripts/build_meta.js",
+    "build": "npm run build:data && npm run release:prepare -- --local",
+    "build:data": "node --env-file=.env.pagefind.local scripts/build_index.js",
     "build:index": "node --env-file=.env.pagefind.local scripts/build_index.js",
     "build:punct-demo": "node --env-file=.env.pagefind.local build_punct_demo.js",
     "demo": "node serve.js",
     "test": "node --test tests/*.test.js",
-    "deploy": "gh-pages -d public -b gh-pages --no-history"
+    "release:prepare": "node --env-file=.env.pagefind.local scripts/prepare_release.js"
   },
   "devDependencies": {
-    "gh-pages": "^6.1.1",
     "pagefind": "^1.5.2"
   }
 }

@@ -2,8 +2,7 @@ import fs from "fs";
 import path from "path";
 
 import { BUCKET_COUNT, getBucketId } from "../build_meta.js";
-import { INDEX_CONCURRENCY, TEXT_DATA_OUTPUT_ROOT } from "./config.js";
-import { toPosixPath } from "./filesystem.js";
+import { INDEX_CONCURRENCY } from "./config.js";
 import { mapWithConcurrency, summarizeBucketStats } from "./pipeline.js";
 
 function addToTextBucket(buckets, record) {
@@ -129,30 +128,5 @@ export async function writeLanguageTextData(languageConfig, languageRecords, met
         `[${languageConfig.id}] Redundancy summary: `
         + `${redundantHashes.size} unique hashes duplicated across multiple talks, `
         + `${redundantWriteCount} extra writes (total).`
-    );
-}
-
-/** @param {import("./config.js").LanguageConfig[]} languageConfigs */
-export function writeTextDataManifest(languageConfigs) {
-    const manifest = {
-        bucketCount: BUCKET_COUNT,
-        pathTemplate: "text-data/{language}/{bucket}.json",
-        languages: languageConfigs.map((config) => ({
-            id: config.id,
-            label: config.label,
-            sourceFiles: config.sourceFiles.map((sourceFile) => sourceFile.fileName),
-            readableSourceDir: fs.existsSync(config.readableSourceDir)
-                ? toPosixPath(path.relative(process.cwd(), config.readableSourceDir))
-                : null,
-            subtitleSourceDir: fs.existsSync(config.subtitleSourceDir)
-                ? toPosixPath(path.relative(process.cwd(), config.subtitleSourceDir))
-                : null
-        }))
-    };
-
-    fs.writeFileSync(
-        path.join(TEXT_DATA_OUTPUT_ROOT, "manifest.json"),
-        `${JSON.stringify(manifest, null, 2)}\n`,
-        "utf-8"
     );
 }

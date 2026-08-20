@@ -29,20 +29,19 @@ function waitForNextPaint() {
 
 export class SearchController {
     constructor({
-        pagefind,
+        pagefindLoader,
         repository,
         resultsView,
         paginationView,
         setStatus,
-        getLanguageBasePath,
         numberFormatter = new Intl.NumberFormat("en-US")
     }) {
-        this.pagefind = pagefind;
+        this.pagefind = null;
+        this.pagefindLoader = pagefindLoader;
         this.repository = repository;
         this.resultsView = resultsView;
         this.paginationView = paginationView;
         this.setStatus = setStatus;
-        this.getLanguageBasePath = getLanguageBasePath;
         this.numberFormatter = numberFormatter;
 
         this.searchToken = 0;
@@ -195,9 +194,8 @@ export class SearchController {
             return;
         }
 
-        await this.pagefind.destroy();
-        await this.pagefind.options({ basePath: this.getLanguageBasePath(language) });
-        await this.pagefind.init();
+        this.initializedLanguage = null;
+        this.pagefind = await this.pagefindLoader.load(language);
         this.initializedLanguage = language;
         this.setStatus(`${getLanguageLabel(language)} 索引已就绪。点击 Search 或按 Enter 开始检索。`);
     }

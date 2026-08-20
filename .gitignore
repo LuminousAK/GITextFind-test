@@ -6,6 +6,7 @@ public/punct-demo/
 .tmp-pagefind-html/
 node_modules/
 dist/
+deploy/cloudflare.local.json
 Readable/
 Subtitle/
 TextMap/
