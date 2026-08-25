@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { getMetaFieldConfig, inferGameVersion } from "./meta-fields.js";
 
 export const DATA_PATH = process.env.GI_DATA_PATH || "E:\\animegamedata2";
 export const OUTPUT_ROOT = path.resolve("./dist/meta-data-standalone");
@@ -34,72 +35,26 @@ function resolveKeys(obj, keysets) {
     return null;
 }
 
-// 6.7
-const TALK_KEYSETS = [
-    {
-        detect: "talkId",
-        mapping: {
-            talk_id: "talkId",
-            dialogue_list: "dialogList",
-            dialogue_id: "id",
-            role: "talkRole",
-            role_type: "type",
-            role_id: "_id",
-            text_hash: "talkContentTextMapHash"
-        }
-    },
-    {
-        detect: "LDLMECNIJFC",
-        mapping: {
-            talk_id: "LDLMECNIJFC",
-            dialogue_list: "GDDPNNHLGBL",
-            dialogue_id: "ANKFNLMKOII",
-            role: "EENIFNIGHCH",
-            role_type: "_type",
-            role_id: "_id",
-            text_hash: "DMIFDJDEFAL"
-        }
-    }
-];
+export function buildMetaData(dataPath = DATA_PATH, { gameVersion = null, datasetVersion = null } = {}) {
+    const resolvedGameVersion = gameVersion || datasetVersion || inferGameVersion(dataPath);
+    const fieldConfig = getMetaFieldConfig(resolvedGameVersion);
+    const { talkKeysets, questKeysets, excelFields } = fieldConfig;
 
-const QUEST_KEYSETS = [
-    {
-        detect: "id",
-        mapping: {
-            quest_id: "id",
-            title_hash: "titleTextMapHash",
-            chapter_id: "chapterId",
-            talks: "talks",
-            talk_id: "id"
-        }
-    },
-    {
-        detect: "ANKFNLMKOII",
-        mapping: {
-            quest_id: "ANKFNLMKOII",
-            title_hash: "OCCBMCOGDOO",
-            chapter_id: "HONEAMECBEN",
-            talks: "OBPMJEILMMK",
-            talk_id: "ANKFNLMKOII"
-        }
-    }
-];
-
-export function buildMetaData(dataPath = DATA_PATH) {
+    console.log(`Using meta field config for game version ${fieldConfig.gameVersion}.`);
     console.log("Loading Excel configs...");
 
     const avatarsFile = path.join(dataPath, "ExcelBinOutput", "AvatarExcelConfigData.json");
     const avatars = JSON.parse(fs.readFileSync(avatarsFile, "utf-8"));
     const avatarMap = new Map();
     for (const avatar of avatars) {
-        avatarMap.set(avatar.id, avatar.nameTextMapHash);
+        avatarMap.set(avatar.id, avatar[excelFields.avatarNameHash]);
     }
 
     const npcsFile = path.join(dataPath, "ExcelBinOutput", "NpcExcelConfigData.json");
     const npcs = JSON.parse(fs.readFileSync(npcsFile, "utf-8"));
     const npcMap = new Map();
     for (const npc of npcs) {
-        npcMap.set(String(npc.id), npc.nameTextMapHash);
+        npcMap.set(String(npc.id), npc[excelFields.npcNameHash]);
     }
 
     const chaptersFile = path.join(dataPath, "ExcelBinOutput", "ChapterExcelConfigData.json");
@@ -107,8 +62,8 @@ export function buildMetaData(dataPath = DATA_PATH) {
     const chapterMap = new Map();
     for (const chapter of chapters) {
         chapterMap.set(chapter.id, {
-            titleHash: chapter.chapterTitleTextMapHash,
-            numHash: chapter.chapterNumTextMapHash
+            titleHash: chapter[excelFields.chapterTitleHash],
+            numHash: chapter[excelFields.chapterNumHash]
         });
     }
 
@@ -121,7 +76,7 @@ export function buildMetaData(dataPath = DATA_PATH) {
     for (const file of questFiles) {
         const filePath = path.join(questRoot, file);
         const obj = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-        const keys = resolveKeys(obj, QUEST_KEYSETS);
+        const keys = resolveKeys(obj, questKeysets);
 
         if (!keys) {
             continue;
@@ -144,9 +99,9 @@ export function buildMetaData(dataPath = DATA_PATH) {
     const fetters = JSON.parse(fs.readFileSync(fettersFile, "utf-8"));
     const fetterMap = new Map();
     for (const fetter of fetters) {
-        fetterMap.set(String(fetter.voiceFileTextTextMapHash), {
-            avatarId: fetter.avatarId,
-            voiceTitleHash: fetter.voiceTitleTextMapHash
+        fetterMap.set(String(fetter[excelFields.fetterVoiceFileHash]), {
+            avatarId: fetter[excelFields.fetterAvatarId],
+            voiceTitleHash: fetter[excelFields.fetterVoiceTitleHash]
         });
     }
 
@@ -165,7 +120,7 @@ export function buildMetaData(dataPath = DATA_PATH) {
         for (const file of fs.readdirSync(folderPath)) {
             const filePath = path.join(folderPath, file);
             const obj = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-            const keys = resolveKeys(obj, TALK_KEYSETS);
+            const keys = resolveKeys(obj, talkKeysets);
 
             if (!keys || !obj[keys.dialogue_list] || obj[keys.dialogue_list].length === 0) {
                 continue;
@@ -275,6 +230,7 @@ export function buildMetaData(dataPath = DATA_PATH) {
     }
 
     return {
+        gameVersion: fieldConfig.gameVersion,
         primaryTalkByHash,
         hashToAllTalks,
         talkHashSets,

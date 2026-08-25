@@ -1,0 +1,100 @@
+{
+  "versions": {
+    "6.7": {
+      "talkKeysets": [
+        {
+          "detect": "talkId",
+          "mapping": {
+            "talk_id": "talkId",
+            "dialogue_list": "dialogList",
+            "dialogue_id": "id",
+            "role": "talkRole",
+            "role_type": "type",
+            "role_id": "_id",
+            "text_hash": "talkContentTextMapHash"
+          }
+        },
+        {
+          "detect": "LDLMECNIJFC",
+          "mapping": {
+            "talk_id": "LDLMECNIJFC",
+            "dialogue_list": "GDDPNNHLGBL",
+            "dialogue_id": "ANKFNLMKOII",
+            "role": "EENIFNIGHCH",
+            "role_type": "_type",
+            "role_id": "_id",
+            "text_hash": "DMIFDJDEFAL"
+          }
+        }
+      ],
+      "questKeysets": [
+        {
+          "detect": "id",
+          "mapping": {
+            "quest_id": "id",
+            "title_hash": "titleTextMapHash",
+            "chapter_id": "chapterId",
+            "talks": "talks",
+            "talk_id": "id"
+          }
+        },
+        {
+          "detect": "ANKFNLMKOII",
+          "mapping": {
+            "quest_id": "ANKFNLMKOII",
+            "title_hash": "OCCBMCOGDOO",
+            "chapter_id": "HONEAMECBEN",
+            "talks": "OBPMJEILMMK",
+            "talk_id": "ANKFNLMKOII"
+          }
+        }
+      ],
+      "excelFields": {
+        "avatarNameHash": "nameTextMapHash",
+        "npcNameHash": "nameTextMapHash",
+        "chapterTitleHash": "chapterTitleTextMapHash",
+        "chapterNumHash": "chapterNumTextMapHash",
+        "fetterAvatarId": "avatarId",
+        "fetterVoiceFileHash": "voiceFileTextTextMapHash",
+        "fetterVoiceTitleHash": "voiceTitleTextMapHash"
+      }
+    },
+    "7.0": {
+      "talkKeysets": [
+        {
+          "detect": "IOKNFDJFGDH",
+          "mapping": {
+            "talk_id": "IOKNFDJFGDH",
+            "dialogue_list": "PFALHAKIILD",
+            "dialogue_id": "OIFGMOHKPOI",
+            "role": "LFGCLNLPAPB",
+            "role_type": "_type",
+            "role_id": "_id",
+            "text_hash": "OACNIBLFFDI"
+          }
+        }
+      ],
+      "questKeysets": [
+        {
+          "detect": "OIFGMOHKPOI",
+          "mapping": {
+            "quest_id": "OIFGMOHKPOI",
+            "title_hash": "LKAHEACOLML",
+            "chapter_id": "BEADANLODNC",
+            "talks": "OJACLOOEAMG",
+            "talk_id": "OIFGMOHKPOI"
+          }
+        }
+      ],
+      "excelFields": {
+        "avatarNameHash": "nameTextMapHash",
+        "npcNameHash": "nameTextMapHash",
+        "chapterTitleHash": "chapterTitleTextMapHash",
+        "chapterNumHash": "chapterNumTextMapHash",
+        "fetterAvatarId": "avatarId",
+        "fetterVoiceFileHash": "voiceFileTextTextMapHash",
+        "fetterVoiceTitleHash": "voiceTitleTextMapHash"
+      }
+    }
+  }
+}

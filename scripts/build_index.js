@@ -59,7 +59,7 @@ async function buildAllIndexes() {
     }
 
     console.log("Building meta-data...");
-    const metaData = buildMetaData(DATA_PATH);
+    const metaData = buildMetaData(DATA_PATH, { datasetVersion: dataset.releaseBaseVersion });
 
     console.log("Reading text sources...");
     const languageDataById = Object.fromEntries(
